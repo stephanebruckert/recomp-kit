@@ -466,11 +466,12 @@ class LoadTests(unittest.TestCase):
             self.assertIn("#define RECOMP_LAUNCHER_MIN_FREE_MB 0u", header)
             self.assertIn("#define RECOMP_REQUIRED_DIRS {0}", header)
             self.assertIn('#define RECOMP_CD_DRIVES ""', header)
+            self.assertIn('#define RECOMP_GUEST_ARGS_DEFAULT ""', header)
             (game / "game.toml").write_text(
                 base.replace("[bundle]\nexclude = []", '[bundle]\nexclude = ["*.dll", "app"]')
                 + '\n[launcher]\ntitle = "Stub \\"Deluxe\\""\nstore = "https://example.test/stub"\n'
                   'install_names = ["Stub Game", "STUB"]\ngog_ids = ["123"]\nmin_free_mb = 50\n'
-                  '\n[setup]\nrequired_dirs = ["data", "levels"]\ncd_drives = ["d", "E"]\n')
+                  '\n[setup]\nrequired_dirs = ["data", "levels"]\ncd_drives = ["d", "E"]\nguest_args = "-window 2"\n')
             header = gen_game_config.render_header(game_config.load(game))
             self.assertIn('#define RECOMP_LAUNCHER_TITLE "Stub \\"Deluxe\\""', header)
             self.assertIn('#define RECOMP_LAUNCHER_INSTALL_NAMES {"Stub Game", "STUB", 0}', header)
@@ -479,6 +480,7 @@ class LoadTests(unittest.TestCase):
             self.assertIn("#define RECOMP_LAUNCHER_MIN_FREE_MB 50u", header)
             self.assertIn('#define RECOMP_REQUIRED_DIRS {"data", "levels", 0}', header)
             self.assertIn('#define RECOMP_CD_DRIVES "DE"', header)
+            self.assertIn('#define RECOMP_GUEST_ARGS_DEFAULT "-window 2"', header)
             for bad in ('cd_drives = "D"', 'cd_drives = ["D:"]', 'cd_drives = ["1"]'):
                 (game / "game.toml").write_text(base + "\n[setup]\n" + bad + "\n")
                 with self.assertRaises(ValueError):

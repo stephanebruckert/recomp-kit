@@ -357,6 +357,10 @@ def load(game_dir):
     setup_dirs = cfg.setdefault("setup", {}).setdefault("required_dirs", [])
     if not isinstance(setup_dirs, list):
         raise ValueError("%s: [setup] required_dirs must be a list" % source)
+    # The switches the original launcher passed, which the game refuses to
+    # start without (TOCA: game directory, CD drive, graphics card).
+    if not isinstance(cfg["setup"].setdefault("guest_args", ""), str):
+        raise ValueError("%s: [setup] guest_args must be a string" % source)
     # Drive letters GetDriveTypeA reports as CD-ROM: a game that checks its
     # disc by drive type runs a reduced mode when no drive is one.
     cd_drives = cfg["setup"].setdefault("cd_drives", [])

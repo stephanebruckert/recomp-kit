@@ -1,4 +1,5 @@
 // Guest root and Windows path semantics for root and nested EXE layouts.
+#include <cstdlib>
 #include "../../runtime/guest_layout.h"
 #include "../../runtime/memory.h"
 #include "../../runtime/win32.h"
@@ -39,6 +40,7 @@ int main() {
     CHECK(root == "C:/Games/Title");
     CHECK(!guest_layout::root_from_exe("/Games/NotBinaries/", "Binaries", &root));
     CHECK(root == "/Games/NotBinaries");
+    setenv("RECOMP_GUEST_ARGS", "", 1); // the bare command line, whatever the game configures
     CHECK(guest_layout::root_from_exe("/Binaries", "Binaries", &root) && root == "/");
     const std::string base = "build/recomp/guest-layout-test";
     os_mkdir("build/recomp");

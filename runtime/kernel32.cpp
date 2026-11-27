@@ -5589,7 +5589,12 @@ void get_command_line(X86 *c) {
         std::string line = module_file_name(0);
         if (line.find_first_of(" \t") != std::string::npos)
             line = '"' + line + '"';
-        if (const char *extra = recomp_env("GUEST_ARGS"); extra && *extra)
+        // RECOMP_GUEST_ARGS overrides the switches game.toml says the game
+        // is always launched with ([setup] guest_args).
+        const char *extra = recomp_env("GUEST_ARGS");
+        if (!extra)
+            extra = RECOMP_GUEST_ARGS_DEFAULT;
+        if (*extra)
             line += std::string(" ") + extra;
         g_cmdline_addr = guest_strdup(line.c_str());
     }

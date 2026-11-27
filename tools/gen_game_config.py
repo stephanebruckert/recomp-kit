@@ -103,6 +103,7 @@ def render_header(cfg):
     lines.append("#define RECOMP_LAUNCHER_STEAM_IDS %s" % c_string_list(launcher["steam_ids"]))
     lines.append("#define RECOMP_LAUNCHER_MIN_FREE_MB %du" % launcher["min_free_mb"])
     lines.append("#define RECOMP_REQUIRED_DIRS %s" % c_string_list(cfg["setup"]["required_dirs"]))
+    lines.append("#define RECOMP_GUEST_ARGS_DEFAULT %s" % c_string(cfg["setup"]["guest_args"]))
     lines.append("#define RECOMP_CD_DRIVES %s" % c_string("".join(d.upper() for d in cfg["setup"]["cd_drives"])))
     lines.append("#define RECOMP_BUNDLE_EXCLUDE %s" % c_string_list(cfg["bundle"]["exclude"]))
     for key, value in sorted(cfg.get("hooks", {}).items()):

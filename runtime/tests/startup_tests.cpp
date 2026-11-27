@@ -1,4 +1,5 @@
 // Startup APIs and 32-bit ABI edge cases checked without a game image.
+#include <cstdlib>
 #include "../imports.h"
 #include "../loader.h"
 #include "../memory.h"
@@ -95,6 +96,8 @@ int main() {
     CHECK(argv(c, "prog \"\" x") == (std::vector<std::string>{"prog", "", "x"}));
     CHECK(argv(c, "prog \"a\\\\\" c") == (std::vector<std::string>{"prog", "a\\", "c"}));
     CHECK(argv(c, "") == (std::vector<std::string>{win32_executable_guest_path()}));
+    // The bare command line: no [setup] guest_args from the game under test.
+    setenv("RECOMP_GUEST_ARGS", "", 1);
     win32_init_layout("build/Program Files", "Program Files");
     const std::string command = gm_str(call(c, "kernel32.dll", "GetCommandLineA"));
     CHECK(command == '"' + win32_executable_guest_path() + '"');

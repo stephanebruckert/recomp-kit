@@ -3,12 +3,14 @@
 // music. A build without FFmpeg refuses to open anything, which the Media
 // Foundation objects above report as an unsupported byte stream.
 #include "mf_media.h"
+#include <cstdio>
 #include <cstring>
 
 #include "video_frame.h"
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 #ifdef RECOMP_HAVE_FFMPEG
 extern "C" {
@@ -301,22 +303,84 @@ void Media::fill_audio(size_t samples) {
 
 #else // no FFmpeg in this build
 
-struct Media::State {};
-Media::~Media() = default;
-void Media::close() {}
-bool Media::is_open() const {
-    return false;
+// Without FFmpeg (the web build) the one format read is plain PCM WAV, 8 or
+// 16-bit: CD music ripped to WAV still plays. Video and compressed audio are
+// refused, which callers report as an unsupported file.
+struct Media::State {
+    FILE *file = nullptr;
+    long data_at = 0;        // the PCM payload, read as it plays
+    size_t data_bytes = 0, pos = 0;
+    int32_t rate = 0, channels = 0, bits = 0;
+    std::vector<int16_t> pcm;
+    ~State() {
+        if (file)
+            fclose(file);
+    }
+};
+Media::~Media() {
+    close();
 }
-bool Media::open(const std::string &, std::string *why) {
-    if (why)
-        *why = "this build has no video decoder";
-    return false;
+void Media::close() {
+    delete s_;
+    s_ = nullptr;
+}
+bool Media::is_open() const {
+    return s_ != nullptr;
+}
+bool Media::open(const std::string &path, std::string *why) {
+    close();
+    auto fail = [&](const char *reason) {
+        if (why)
+            *why = reason;
+        return false;
+    };
+    auto st = std::make_unique<State>();
+    st->file = fopen(path.c_str(), "rb");
+    if (!st->file)
+        return fail("cannot open the file");
+    uint8_t h[12];
+    if (fread(h, 1, 12, st->file) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4))
+        return fail("this build has no video decoder and reads only PCM WAV");
+    auto u32 = [](const uint8_t *b) {
+        return uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 | uint32_t(b[3]) << 24;
+    };
+    bool fmt = false;
+    for (;;) { // the chunk headers, skipping each body but fmt's
+        uint8_t c[8];
+        if (fread(c, 1, 8, st->file) != 8)
+            break;
+        const uint32_t size = u32(c + 4);
+        if (!memcmp(c, "fmt ", 4) && size >= 16) {
+            uint8_t b[16];
+            if (fread(b, 1, 16, st->file) != 16)
+                break;
+            if ((b[0] | b[1] << 8) != 1) // WAVE_FORMAT_PCM
+                return fail("the WAV is not PCM");
+            st->channels = b[2] | b[3] << 8;
+            st->rate = int32_t(u32(b + 4));
+            st->bits = b[14] | b[15] << 8;
+            fmt = true;
+            fseek(st->file, long(size - 16 + (size & 1)), SEEK_CUR);
+        } else if (!memcmp(c, "data", 4)) {
+            st->data_at = ftell(st->file);
+            st->data_bytes = size;
+            break;
+        } else {
+            fseek(st->file, long(size + (size & 1)), SEEK_CUR);
+        }
+    }
+    if (!fmt || !st->data_bytes || st->channels < 1 || st->channels > 2 || st->rate <= 0 ||
+        (st->bits != 8 && st->bits != 16))
+        return fail("the WAV is not 8 or 16-bit mono or stereo PCM");
+    fseek(st->file, st->data_at, SEEK_SET);
+    s_ = st.release();
+    return true;
 }
 bool Media::has_video() const {
     return false;
 }
 bool Media::has_audio() const {
-    return false;
+    return s_ != nullptr;
 }
 int32_t Media::width() const {
     return 0;
@@ -325,23 +389,44 @@ int32_t Media::height() const {
     return 0;
 }
 double Media::duration() const {
-    return 0;
+    return s_ ? double(s_->data_bytes) / (s_->rate * s_->channels * (s_->bits / 8)) : 0;
 }
 int32_t Media::audio_rate() const {
-    return 0;
+    return s_ ? s_->rate : 0;
 }
 int32_t Media::audio_channels() const {
-    return 0;
+    return s_ ? s_->channels : 0;
 }
 bool Media::next_video(VideoFrame *) {
     return false;
 }
-void Media::fill_audio(size_t) {}
+void Media::fill_audio(size_t samples) {
+    if (!s_)
+        return;
+    const size_t bytes = size_t(s_->bits / 8);
+    uint8_t buf[8192];
+    while (s_->pcm.size() < samples && s_->pos < s_->data_bytes) {
+        size_t want = std::min(sizeof buf, s_->data_bytes - s_->pos);
+        want -= want % bytes;
+        const size_t got = want ? fread(buf, 1, want, s_->file) : 0;
+        if (got < bytes) {
+            s_->pos = s_->data_bytes; // a short file ends here
+            break;
+        }
+        for (size_t o = 0; o + bytes <= got; o += bytes)
+            s_->pcm.push_back(bytes == 1 ? int16_t((int(buf[o]) - 128) * 256)
+                                         : int16_t(uint16_t(buf[o] | buf[o + 1] << 8)));
+        s_->pos += got - got % bytes;
+    }
+}
 std::vector<int16_t> Media::take_audio() {
-    return {};
+    std::vector<int16_t> out;
+    if (s_)
+        out.swap(s_->pcm);
+    return out;
 }
 bool Media::finished() const {
-    return true;
+    return !s_ || (s_->pos >= s_->data_bytes && s_->pcm.empty());
 }
 
 #endif

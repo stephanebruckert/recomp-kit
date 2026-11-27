@@ -146,8 +146,14 @@ void feed_audio() {
 
 // Presents the newest frame that is due and holds the first that is not.
 void advance() {
-    if (!g.playing || !g.media)
+    if (!g.playing)
         return;
+    if (!g.media) { // undecodable: the film is over before it starts
+        g.playing = false;
+        g.done = true;
+        post_notify(MCI_NOTIFY_SUCCESSFUL);
+        return;
+    }
     const double t = g.position + (now_seconds() - g.clock0);
     bool show = false;
     if (g.have_next && g.next.pts <= t) {
@@ -197,14 +203,22 @@ uint32_t open_cmd(uint32_t flags, uint32_t p) {
     const std::string name = gm_str(rd32(p + 12));
     const std::string host = win32_host_path_op(name, WIN32_FILE_READ);
     close_movie();
-    if (host.empty() || !load(host)) {
-        LOGW("mci: cannot play %s (%s)", name.c_str(), host.empty() ? "not found" : host.c_str());
+    if (host.empty()) {
+        LOGW("mci: cannot play %s (not found)", name.c_str());
         return MCIERR_FILE_NOT_FOUND;
+    }
+    if (!load(host)) {
+        // The film is there but this build cannot decode it (the web build
+        // has no FFmpeg). It opens anyway and ends as soon as it is played:
+        // a game waiting for MM_MCINOTIFY moves on instead of waiting for ever.
+        LOGW("mci: cannot decode %s; it will end at once", name.c_str());
+        g.media.reset();
     }
     g.open = true;
     g.path = host;
     wr32(p + 4, kDevice);
-    LOGV("mci: opened %s, %dx%d", name.c_str(), g.media->width(), g.media->height());
+    if (g.media)
+        LOGV("mci: opened %s, %dx%d", name.c_str(), g.media->width(), g.media->height());
     return 0;
 }
 
@@ -251,7 +265,7 @@ void m_mciSendCommandA(X86 *c) {
     case MCI_SEEK: // TOCA seeks only to the start; any seek restarts the film
         audio_stop();
         g.playing = false;
-        if (!load(g.path))
+        if (g.media && !load(g.path))
             rc = MCIERR_FILE_NOT_FOUND;
         break;
     case MCI_STATUS:
