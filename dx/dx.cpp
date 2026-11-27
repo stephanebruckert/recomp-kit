@@ -567,6 +567,7 @@ void dx_free_audio_channel(int32_t ch) {
 static void file_audio_frame_pump(X86 *c) {
     mss32_frame_pump(c);
     redbook_frame_pump(c);
+    mci_frame_pump(c);
     waveout_frame_pump(c);
     dshow_frame_pump(c);
     fmod_frame_pump(c);
@@ -601,6 +602,7 @@ void dx_register_shims() {
     qmixer_register();
     mss32_register();
     redbook_register();
+    mci_register();
     avi_register();
     waveout_register();
     fmod_register();

@@ -13191,6 +13191,77 @@ static void test_avi_asset(const char *path) {
     heap_free(output);
 }
 
+// Unsigned 8-bit PCM, the soundtrack format of 1990s AVI and WAV files,
+// decodes to centred signed samples rather than to silence.
+static void test_media_u8_wav() {
+#ifdef RECOMP_HAVE_FFMPEG
+    const char *path = "build/recomp/u8-test.wav";
+    const uint8_t pcm[] = {128, 255, 0, 192, 64, 128, 128, 128};
+    std::vector<uint8_t> f;
+    auto put32 = [&](uint32_t v) {
+        for (int k = 0; k < 4; ++k)
+            f.push_back(uint8_t(v >> (8 * k)));
+    };
+    auto put16 = [&](uint16_t v) {
+        f.push_back(uint8_t(v));
+        f.push_back(uint8_t(v >> 8));
+    };
+    f.insert(f.end(), {'R', 'I', 'F', 'F'});
+    put32(36 + sizeof pcm);
+    f.insert(f.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+    put32(16);
+    put16(1);    // PCM
+    put16(1);    // mono
+    put32(8000); // Hz
+    put32(8000);
+    put16(1);
+    put16(8);
+    f.insert(f.end(), {'d', 'a', 't', 'a'});
+    put32(sizeof pcm);
+    f.insert(f.end(), pcm, pcm + sizeof pcm);
+    FILE *out = fopen(path, "wb");
+    CHECK(out != nullptr);
+    if (!out)
+        return;
+    fwrite(f.data(), 1, f.size(), out);
+    fclose(out);
+    mf::Media media;
+    CHECK(media.open(path));
+    CHECK(media.has_audio());
+    media.fill_audio(64);
+    auto got = media.take_audio();
+    CHECK(got.size() >= 4);
+    if (got.size() >= 4) {
+        CHECK_EQ(got[0], 0);
+        CHECK(got[1] > 32000);
+        CHECK(got[2] < -32000);
+        CHECK(got[3] > 16000 && got[3] < 16500);
+    }
+    remove(path);
+#endif
+}
+
+// MCI digital video: the paths a game takes before and around a film.
+static void test_mci_device() {
+    cpu_reset();
+    uint32_t send = tramp("WINMM.dll", "mciSendCommandA"), getid = tramp("WINMM.dll", "mciGetDeviceIDA");
+    uint32_t p = sc(0x100);
+    gm_zero(p, 32);
+    // MCI_OPEN with MCI_OPEN_TYPE alone loads the driver and names a device.
+    CHECK_EQ(call_shim(send, {0, 0x803, 0x2000, p}), 0u);
+    CHECK(rd32(p + 4) != 0);
+    gm_put_str(sc(0x200), "avivideo", 32);
+    CHECK_EQ(call_shim(getid, {sc(0x200)}), 0u); // no film open
+    // A film that is not there is MCIERR_FILE_NOT_FOUND.
+    gm_zero(p, 32);
+    gm_put_str(sc(0x240), "video\\no-such-film.avi", 64);
+    wr32(p + 12, sc(0x240));
+    CHECK_EQ(call_shim(send, {0, 0x803, 0x30200, p}), 275u);
+    // Commands to a device that is not open are MCIERR_INVALID_DEVICE_ID; a close is harmless.
+    CHECK_EQ(call_shim(send, {1, 0x806, 1, p}), 257u);
+    CHECK_EQ(call_shim(send, {1, 0x804, 0, p}), 0u);
+}
+
 // Optional audio probe uses the same decoder as file-backed CD music. A
 // generated Ogg tone works in CI; private tracks can be checked locally.
 static void test_audio_asset(const char *path) {
@@ -13368,6 +13439,8 @@ int main() {
         {"SetRenderTarget self", test_setrendertarget_same_surface},
         {"FindDevice, literal", test_find_device_literal},
         {"viewport record", test_viewport_record},
+        {"unsigned 8-bit media audio", test_media_u8_wav},
+        {"MCI digital video device", test_mci_device},
         {"Miles double buffering", test_mss32_double_buffer},
         {"D3DVT_VERTEX lighting", test_d3d_vertex_lighting},
         {"Direct3D5 execute buffer", test_d3d5_execute_buffer},

@@ -3,6 +3,7 @@
 // music. A build without FFmpeg refuses to open anything, which the Media
 // Foundation objects above report as an unsupported byte stream.
 #include "mf_media.h"
+#include <cstring>
 
 #include "video_frame.h"
 
@@ -79,6 +80,12 @@ void append_samples(std::vector<int16_t> &out, const AVFrame &f) {
             case AV_SAMPLE_FMT_S16:
                 value = reinterpret_cast<const int16_t *>(f.extended_data[0])[i * channels + ch] /
                         32768.0;
+                break;
+            case AV_SAMPLE_FMT_U8: // the PCM of 1990s AVI and WAV soundtracks
+                value = (f.extended_data[0][i * channels + ch] - 128) / 128.0;
+                break;
+            case AV_SAMPLE_FMT_U8P:
+                value = (f.extended_data[ch][i] - 128) / 128.0;
                 break;
             default:
                 return; // an unexpected format is silence rather than noise
@@ -194,19 +201,56 @@ bool Media::next_video(VideoFrame *out) {
     for (;;) {
         if (avcodec_receive_frame(s_->video, s_->frame) >= 0) {
             const AVFrame &f = *s_->frame;
-            if (f.format != AV_PIX_FMT_YUV420P || f.width <= 0 || f.height <= 0) {
+            // YUV 4:2:0 (most codecs) and the RGB layouts the Video for
+            // Windows codecs decode to: Cinepak gives RGB24, or PAL8 for an
+            // 8-bit film; MS Video 1 and RLE give 16-bit RGB or a palette.
+            const bool known = f.format == AV_PIX_FMT_YUV420P || f.format == AV_PIX_FMT_RGB24 ||
+                               f.format == AV_PIX_FMT_BGR24 || f.format == AV_PIX_FMT_PAL8 ||
+                               f.format == AV_PIX_FMT_RGB555LE || f.format == AV_PIX_FMT_RGB565LE;
+            if (!known || f.width <= 0 || f.height <= 0) {
                 av_frame_unref(s_->frame);
                 continue; // an unexpected layout is skipped, not drawn wrong
             }
             out->width = f.width;
             out->height = f.height;
             out->argb.assign(size_t(f.width) * size_t(f.height), 0);
-            for (int y = 0; y < f.height; ++y)
-                video_frame_convert_row(
-                    reinterpret_cast<uint8_t *>(out->argb.data() + size_t(y) * size_t(f.width)),
-                    f.data[0] + size_t(y) * f.linesize[0],
-                    f.data[1] + size_t(y / 2) * f.linesize[1],
-                    f.data[2] + size_t(y / 2) * f.linesize[2], uint32_t(f.width), VIDEO_XRGB8888);
+            for (int y = 0; y < f.height; ++y) {
+                uint32_t *dst = out->argb.data() + size_t(y) * size_t(f.width);
+                const uint8_t *row = f.data[0] + size_t(y) * f.linesize[0];
+                if (f.format == AV_PIX_FMT_YUV420P) {
+                    video_frame_convert_row(reinterpret_cast<uint8_t *>(dst), row,
+                                            f.data[1] + size_t(y / 2) * f.linesize[1],
+                                            f.data[2] + size_t(y / 2) * f.linesize[2],
+                                            uint32_t(f.width), VIDEO_XRGB8888);
+                    continue;
+                }
+                for (int x = 0; x < f.width; ++x) {
+                    uint32_t r, g, b;
+                    if (f.format == AV_PIX_FMT_RGB24 || f.format == AV_PIX_FMT_BGR24) {
+                        const uint8_t *p = row + 3 * x;
+                        r = f.format == AV_PIX_FMT_RGB24 ? p[0] : p[2];
+                        g = p[1];
+                        b = f.format == AV_PIX_FMT_RGB24 ? p[2] : p[0];
+                    } else if (f.format == AV_PIX_FMT_PAL8) {
+                        uint32_t c;
+                        memcpy(&c, f.data[1] + 4 * row[x], 4); // ARGB in native order
+                        r = (c >> 16) & 255;
+                        g = (c >> 8) & 255;
+                        b = c & 255;
+                    } else {
+                        const uint32_t v = row[2 * x] | uint32_t(row[2 * x + 1]) << 8;
+                        if (f.format == AV_PIX_FMT_RGB565LE) {
+                            r = (v >> 11 & 31) * 255 / 31;
+                            g = (v >> 5 & 63) * 255 / 63;
+                        } else {
+                            r = (v >> 10 & 31) * 255 / 31;
+                            g = (v >> 5 & 31) * 255 / 31;
+                        }
+                        b = (v & 31) * 255 / 31;
+                    }
+                    dst[x] = 0xff000000u | r << 16 | g << 8 | b;
+                }
+            }
             const AVRational tb = s_->input->streams[s_->video_index]->time_base;
             const int64_t pts =
                 f.best_effort_timestamp != AV_NOPTS_VALUE ? f.best_effort_timestamp : f.pts;
