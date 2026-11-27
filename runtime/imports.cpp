@@ -878,7 +878,20 @@ static bool imports_dispatch_holding(X86 *c, uint32_t target) {
             serial->lock();
         if (RECOMP_UNLIKELY(parallel))
             sched_nest_enter(c->r[R_ESP]);
+        const uint64_t call_t0 = os_monotonic_ns();
         fn(c);
+        // A call the game waits a quarter of a second or more on is a stall
+        // a player sees; name it (the first 20), wherever it happens.
+        if (const uint64_t took = os_monotonic_ns() - call_t0; RECOMP_UNLIKELY(took > 250000000ull)) {
+            static int said = 0;
+            const char *name = desc_now();
+            const bool waits = strstr(name, "Wait") || strstr(name, "Sleep") ||
+                               strstr(name, "GetMessage") || strstr(name, "Dialog") ||
+                               strstr(name, "MessageBox");
+            if (!waits && said++ < 20)
+                fprintf(stderr, "[recomp] slow call: %s took %.0f ms\n", desc_now(),
+                        took / 1e6);
+        }
         if (RECOMP_UNLIKELY(parallel))
             sched_nest_leave();
         if (serial)

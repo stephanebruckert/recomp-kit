@@ -2221,19 +2221,28 @@ void D3DRenderer::Impl::applyCPU(const HostD3DSurface *surface, const HostBlitRe
     mask_shape(surface->gmask, &gs, &gm);
     mask_shape(surface->bmask, &bs, &bm);
     auto edge = [](int x, int n, int g) { return (int)(((int64_t)x * n + g - 1) / g); };
-    for (int y = 0; y < r->h; ++y)
+    // A write that covers its whole rectangle (an unkeyed blit) goes up as one
+    // block. Row by row it cost two buffers and two copies per row, and on
+    // WebGPU each buffer from the pool is a main-thread round trip per
+    // pooled entry: a 320x200 blit took seconds.
+    bool full = true;
+    if (r->coverage)
+        for (size_t i = 0, n = (size_t)r->w * r->h; i < n && full; ++i)
+            full = r->coverage[i] != 0;
+    const int rows = full ? 1 : r->h;
+    for (int y = 0; y < rows; ++y)
         for (int x = 0; x < r->w;) {
-            if (r->coverage && !r->coverage[y * r->w + x]) {
+            if (!full && r->coverage && !r->coverage[y * r->w + x]) {
                 ++x;
                 continue;
             }
             int start = x;
-            while (x < r->w && (!r->coverage || r->coverage[y * r->w + x]))
+            while (x < r->w && (full || !r->coverage || r->coverage[y * r->w + x]))
                 ++x;
             int x0 = edge(r->dst_x + start, width_, guest_width_),
                 x1 = edge(r->dst_x + x, width_, guest_width_);
             int y0 = edge(r->dst_y + y, height_, guest_height_),
-                y1 = edge(r->dst_y + y + 1, height_, guest_height_);
+                y1 = edge(r->dst_y + (full ? r->h : y + 1), height_, guest_height_);
             if (x1 <= x0 || y1 <= y0)
                 continue;
             size_t pitch = ((size_t)(x1 - x0) * 4 + 255) & ~255u;
@@ -2250,7 +2259,12 @@ void D3DRenderer::Impl::applyCPU(const HostD3DSurface *surface, const HostBlitRe
             for (int ny = y0; ny < y1; ++ny)
                 for (int nx = x0; nx < x1; ++nx) {
                     int gx = (int)((int64_t)nx * guest_width_ / width_) - r->dst_x;
-                    const uint8_t *pixel = r->cpu_pixels + (size_t)y * r->cpu_pitch +
+                    // The guest row this target row samples: `y` itself row
+                    // by row, or found from ny when the block is uploaded whole.
+                    int gy = full ? (int)((int64_t)ny * guest_height_ / height_) - r->dst_y : y;
+                    gx = std::clamp(gx, 0, r->w - 1);
+                    gy = std::clamp(gy, 0, r->h - 1);
+                    const uint8_t *pixel = r->cpu_pixels + (size_t)gy * r->cpu_pitch +
                                            gx * texture_storage_bytes(r->cpu_bpp);
                     uint32_t red = 0, g = 0, b = 0;
                     if (r->cpu_bpp == 8) {
@@ -3186,6 +3200,15 @@ void D3DRenderer::Impl::captureReplayCheckpoint(bool needed) {
 // restarts from the entry seed and merges records/Clear/primitives by seq into
 // a guest-resolution target. No presenter or window service is needed.
 bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
+    // A replay that holds the game up for a quarter second or more says
+    // where the time went (the first 10): on WebGPU each GPU call is a round
+    // trip to the browser's main thread.
+    uint64_t rp_ns[5] = {0, 0, 0, 0, 0}, rp_t = os_monotonic_ns();
+    auto rp_mark = [&](int k) {
+        const uint64_t t = os_monotonic_ns();
+        rp_ns[k] += t - rp_t;
+        rp_t = t;
+    };
     flush();
     saveSlot();
     int previous = active_slot_;
@@ -3221,6 +3244,7 @@ bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
         index_cache_valid_ = false;
         // Discard the speculative native result only after its GPU work has
         // completed. The four frame slots and their lifetime do not change.
+        rp_mark(0); // flush, checkpoint capture, GPU wait
         releaseMirror();
         allocateMirror(guest_width_, guest_height_);
         pending_id_ = target_id_;
@@ -3273,6 +3297,7 @@ bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
             gpu_dirty_ = true;
             legacyWriteBackPending();
         }
+        rp_mark(1); // mirror and checkpoint restore
         std::stable_sort(j.steps.begin(), j.steps.end(),
                          [](const ReplayStep &a, const ReplayStep &b) { return a.seq < b.seq; });
         for (auto &step : j.steps) {
@@ -3389,6 +3414,7 @@ bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
             needs_upload_ = true;
             coverage_reset_pending_ = true;
         }
+        rp_mark(2); // the journal
         legacyWriteBackPending();
         // Publish the quantized legacy picture, including final CPU-only
         // writes, not the unquantized colour left by the last primitive.
@@ -3408,6 +3434,17 @@ bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
         gpu_dirty_ = false;
         pending_id_ = 0;
         host_d3d_clean_pixels(actual.id, slot.generation, {0, 0, actual.width, actual.height});
+        rp_mark(3); // write-back, upload, submit, wait, copy out
+        {
+            const uint64_t total = rp_ns[0] + rp_ns[1] + rp_ns[2] + rp_ns[3];
+            static int said = 0;
+            if (total > 250000000ull && said++ < 10)
+                fprintf(stderr,
+                        "[host] slow 3D read-back %.0f ms: wait %.0f, restore %.0f, journal %.0f "
+                        "(%zu steps), finish %.0f\n",
+                        total / 1e6, rp_ns[0] / 1e6, rp_ns[1] / 1e6, rp_ns[2] / 1e6,
+                        j.steps.size(), rp_ns[3] / 1e6);
+        }
         replaying_ = false;
         j.done = true;
         saveSlot();
