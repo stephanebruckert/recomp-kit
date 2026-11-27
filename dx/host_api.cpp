@@ -3,6 +3,7 @@
 // Task 7 links strong definitions over these. Building with
 // -DRECOMP_NULL_HOST makes them strong, which pins a headless run to doing
 // nothing graphical or audible even if a host object file is on the link line.
+#include <cstdio>
 #include "host_api.h"
 #include <string.h>
 #include "../platform/os.h"
@@ -233,8 +234,18 @@ int host_d3d_make_coherent(const HostD3DSurface *s, uint32_t g, const HostDirtyR
         ++clean_reads;
         return 0;
     }
+    const uint64_t t0 = os_monotonic_ns();
     if (!host_d3d_readback_rects(s, g, read.data(), (uint32_t)read.size()))
         return -1;
+    {
+        // What a reader of the 3D surface costs: said once, after 100 reads,
+        // because on WebGPU each one is an asynchronous GPU round trip.
+        static uint64_t total_ns = 0, count = 0;
+        total_ns += os_monotonic_ns() - t0;
+        if (++count == 100)
+            fprintf(stderr, "[host] 3D surface read-backs: 100 took %.2f ms on average\n",
+                    total_ns / 100.0 / 1e6);
+    }
     host_d3d_clean_pixels(s->id, g, request);
     ++readbacks[why];
     host_d3d_note_readback(why);

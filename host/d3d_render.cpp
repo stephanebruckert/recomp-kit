@@ -3234,13 +3234,32 @@ bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
                 auto *from = (const uint8_t *)device_->map_read(j.checkpoint[k]);
                 if (!from)
                     return false;
-                for (int y = 0; y < height_; ++y)
-                    for (int x = 0; x < width_; ++x) {
-                        int sx = (int)((int64_t)(2 * x + 1) * j.width / (2 * width_));
-                        int sy = (int)((int64_t)(2 * y + 1) * j.height / (2 * height_));
-                        memcpy(data.data() + y * pitch + x * bpp, from + sy * j.pitch[k] + sx * bpp,
-                               bpp);
+                if (j.width == width_ && j.height == height_) {
+                    // Same size: whole rows.
+                    for (int y = 0; y < height_; ++y)
+                        memcpy(data.data() + y * pitch, from + y * j.pitch[k], (size_t)width_ * bpp);
+                } else {
+                    // Centre sampling, with the column offsets worked out once.
+                    std::vector<uint32_t> col((size_t)width_);
+                    for (int x = 0; x < width_; ++x)
+                        col[(size_t)x] =
+                            (uint32_t)((int64_t)(2 * x + 1) * j.width / (2 * width_)) * (uint32_t)bpp;
+                    for (int y = 0; y < height_; ++y) {
+                        const int sy = (int)((int64_t)(2 * y + 1) * j.height / (2 * height_));
+                        const uint8_t *row = from + (size_t)sy * j.pitch[k];
+                        uint8_t *out = data.data() + (size_t)y * pitch;
+                        if (bpp == 4) {
+                            for (int x = 0; x < width_; ++x) {
+                                uint32_t v;
+                                memcpy(&v, row + col[(size_t)x], 4);
+                                memcpy(out + (size_t)x * 4, &v, 4);
+                            }
+                        } else {
+                            for (int x = 0; x < width_; ++x)
+                                out[x] = row[col[(size_t)x]];
+                        }
                     }
+                }
                 gpu::Buffer buffer = argumentBytes(data.data(), data.size());
                 device_->copy_buffer_to_texture(command_, buffer, 0, int(pitch), textures[k],
                                                 {0, 0, width_, height_});
