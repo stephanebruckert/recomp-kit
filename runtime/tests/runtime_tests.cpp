@@ -1878,6 +1878,10 @@ static void test_misc_shims(X86 *c) {
     uint32_t out = scratch_block(128);
     call_import(c, "USER32.dll", "wvsprintfA", {out, fmt, va});
     check(gm_str(out) == "blue has 12 units (002a)", "wvsprintfA -> \"%s\"", gm_str(out).c_str());
+    uint32_t out2 = scratch_block(128);
+    call_import(c, "USER32.dll", "wsprintfA", {out2, fmt, put_str("red"), 7, 0xbeef});
+    check(gm_str(out2) == "red has 7 units (beef)", "wsprintfA reads its inline arguments -> \"%s\"",
+          gm_str(out2).c_str());
 
     uint32_t spc = scratch_block(4), bps = scratch_block(4), fr = scratch_block(4),
              tot = scratch_block(4);

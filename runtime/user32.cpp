@@ -1606,6 +1606,18 @@ void u_wvsprintfA(X86 *c) {
     set_eax(c, (uint32_t)res.size());
 }
 
+// wsprintfA(out, fmt, ...): cdecl, the caller pops. The variadic arguments
+// follow the format on the stack, which is the array wvsprintfA walks.
+void u_wsprintfA(X86 *c) {
+    X86 t = *c;
+    t.r[R_ESP] = c->r[R_ESP] - 64;
+    wr32(t.r[R_ESP] + 4, arg(c, 0));
+    wr32(t.r[R_ESP] + 8, arg(c, 1));
+    wr32(t.r[R_ESP] + 12, c->r[R_ESP] + 12);
+    u_wvsprintfA(&t);
+    set_eax(c, t.r[R_EAX]);
+}
+
 } // namespace user32
 
 void win32_refresh_display_window(X86 *c, uint32_t hwnd, uint32_t w, uint32_t h, uint32_t bpp) {
@@ -1859,6 +1871,7 @@ const ImportShim g_user32_shims[] = {
     {"USER32.dll", "MessageBoxA", 4, u_MessageBoxA},
     {"USER32.dll", "MessageBoxW", 4, u_MessageBoxW},
     {"USER32.dll", "wvsprintfA", 3, u_wvsprintfA},
+    {"USER32.dll", "wsprintfA", ARGC_CDECL, u_wsprintfA},
     // Not imported by D3DPopTB.exe, but registered so GetProcAddress and the
     // host layer can reach them.
     {"USER32.dll", "SendMessageA", 4, u_SendMessageA},
