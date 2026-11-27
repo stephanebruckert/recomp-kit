@@ -1277,7 +1277,15 @@ void D3DRenderer::Impl::setRenderTarget(const HostD3DSurface *target) {
                        scene_height_ ? scene_height_ : target->height);
         // Alternating front/back surfaces is normal frame traffic. Report
         // configuration changes without synchronous console I/O every frame.
-        if (format_changed) {
+        // Said when the format really changes. Every new frame's slot starts
+        // with no remembered size, so this printed twice a frame in a race,
+        // and on the web each line is a trip through the main thread.
+        static int said_w = 0, said_h = 0, said_bpp = 0;
+        if (format_changed && (target->width != said_w || target->height != said_h ||
+                               target->bpp != said_bpp)) {
+            said_w = target->width;
+            said_h = target->height;
+            said_bpp = target->bpp;
             printf("[host] Direct3D renders into surface %u, %dx%d %dbpp\n", target->id,
                    target->width, target->height, target->bpp);
             fflush(stdout);

@@ -8,6 +8,8 @@
 #include <emscripten/threading.h>
 
 #include <algorithm>
+#include <vector>
+#include <functional>
 #include <cstdio>
 #include <cstring>
 
@@ -126,7 +128,9 @@ void on_error(WGPUDevice const *, WGPUErrorType type, WGPUStringView message, vo
 
 // WebGPU objects belong to the main thread. A call from any other thread (the
 // game's, reaching the presenter) runs there while the caller waits.
+void flush_calls();
 template <class F> auto on_main(F &&f) -> decltype(f()) {
+    flush_calls();
     using R = decltype(f());
     struct Job {
         F *f;
@@ -142,7 +146,7 @@ template <class F> auto on_main(F &&f) -> decltype(f()) {
                           &Job::run, &job);
     return out;
 }
-template <class F> void on_main_void(F &&f) {
+template <class F> void on_main_sync_void(F &&f) {
     struct Job {
         F *f;
         static void run(void *arg) {
@@ -153,6 +157,34 @@ template <class F> void on_main_void(F &&f) {
     emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(),
                           &Job::run, &job);
 }
+// Calls that return nothing are queued on the calling thread and sent to the
+// main thread together, in order, the next time that thread needs an answer
+// or submits. One round trip per call cost a display frame each whenever the
+// main thread was busy, and a read-back of a fragmented surface makes hundreds.
+std::vector<std::function<void()>> &pending_calls() {
+    thread_local std::vector<std::function<void()>> calls;
+    return calls;
+}
+void flush_calls() {
+    auto &calls = pending_calls();
+    if (calls.empty())
+        return;
+    std::vector<std::function<void()>> run;
+    run.swap(calls);
+    on_main_sync_void([&] {
+        for (auto &call : run)
+            call();
+    });
+}
+// Queued: the closure must own copies of everything it uses.
+template <class F> void on_main_void(F &&f) {
+    pending_calls().emplace_back(std::forward<F>(f));
+}
+// Sent now, after everything queued before it.
+template <class F> void on_main_now(F &&f) {
+    flush_calls();
+    on_main_sync_void(std::forward<F>(f));
+}
 bool off_main() {
     return !emscripten_is_main_runtime_thread();
 }
@@ -161,6 +193,7 @@ bool off_main() {
 // its eventual callback finishes the proxy after copying CPU-visible bytes.
 // A system proxy task must not wait for the browser's event loop itself.
 template <class F> bool await_main(F &&start) {
+    flush_calls();
     struct Job {
         F *start;
         static void run(em_proxying_ctx *context, void *arg) {
@@ -449,7 +482,7 @@ bool WebGpuDevice::readback(Texture texture, Region region, void *bytes, int pit
 
 void WebGpuDevice::destroy(Texture tex) {
     if (off_main())
-        return on_main_void([&] { destroy(tex); });
+        return on_main_void([=, this] { destroy(tex); });
     auto it = textures_.find(tex.id);
     if (it == textures_.end())
         return;
@@ -500,7 +533,13 @@ Buffer WebGpuDevice::create_buffer(uint64_t bytes, const void *contents) {
 
 void WebGpuDevice::update(Buffer b, uint64_t offset, const void *bytes, uint64_t count) {
     if (off_main())
-        return on_main_void([&] { update(b, offset, bytes, count); });
+        {
+            std::vector<uint8_t> copy(static_cast<const uint8_t *>(bytes),
+                                      static_cast<const uint8_t *>(bytes) + count);
+            return on_main_void([=, this, copy = std::move(copy)] {
+                update(b, offset, copy.data(), copy.size());
+            });
+        }
     auto it = buffers_.find(b.id);
     if (it == buffers_.end() || !bytes || offset + count > it->second.bytes)
         return;
@@ -552,7 +591,7 @@ uint64_t WebGpuDevice::buffer_bytes(Buffer b) {
 
 void WebGpuDevice::destroy(Buffer b) {
     if (off_main())
-        return on_main_void([&] { destroy(b); });
+        return on_main_void([=, this] { destroy(b); });
     auto it = buffers_.find(b.id);
     if (it == buffers_.end())
         return;
@@ -779,7 +818,7 @@ void WebGpuDevice::end_passes(Cmd &c) {
 
 void WebGpuDevice::begin_render_pass(CommandBuffer cb, const RenderPass &pass) {
     if (off_main())
-        return on_main_void([&] { begin_render_pass(cb, pass); });
+        return on_main_void([=, this] { begin_render_pass(cb, pass); });
     Cmd *c = cmd(cb);
     if (!c)
         return;
@@ -833,14 +872,14 @@ void WebGpuDevice::begin_render_pass(CommandBuffer cb, const RenderPass &pass) {
 
 void WebGpuDevice::end_render_pass(CommandBuffer cb) {
     if (off_main())
-        return on_main_void([&] { end_render_pass(cb); });
+        return on_main_void([=, this] { end_render_pass(cb); });
     if (Cmd *c = cmd(cb))
         end_passes(*c);
 }
 
 void WebGpuDevice::begin_compute_pass(CommandBuffer cb) {
     if (off_main())
-        return on_main_void([&] { begin_compute_pass(cb); });
+        return on_main_void([=, this] { begin_compute_pass(cb); });
     Cmd *c = cmd(cb);
     if (!c)
         return;
@@ -851,14 +890,14 @@ void WebGpuDevice::begin_compute_pass(CommandBuffer cb) {
 
 void WebGpuDevice::end_compute_pass(CommandBuffer cb) {
     if (off_main())
-        return on_main_void([&] { end_compute_pass(cb); });
+        return on_main_void([=, this] { end_compute_pass(cb); });
     if (Cmd *c = cmd(cb))
         end_passes(*c);
 }
 
 void WebGpuDevice::set_pipeline(CommandBuffer cb, Pipeline p) {
     if (off_main())
-        return on_main_void([&] { set_pipeline(cb, p); });
+        return on_main_void([=, this] { set_pipeline(cb, p); });
     if (Cmd *c = cmd(cb)) {
         c->pipeline = p.id;
         c->bound = nullptr;
@@ -866,7 +905,7 @@ void WebGpuDevice::set_pipeline(CommandBuffer cb, Pipeline p) {
 }
 void WebGpuDevice::set_depth(CommandBuffer cb, const DepthState &d) {
     if (off_main())
-        return on_main_void([&] { set_depth(cb, d); });
+        return on_main_void([=, this] { set_depth(cb, d); });
     if (Cmd *c = cmd(cb)) {
         c->depth = d;
         c->bound = nullptr;
@@ -874,7 +913,7 @@ void WebGpuDevice::set_depth(CommandBuffer cb, const DepthState &d) {
 }
 void WebGpuDevice::set_cull(CommandBuffer cb, Cull cull) {
     if (off_main())
-        return on_main_void([&] { set_cull(cb, cull); });
+        return on_main_void([=, this] { set_cull(cb, cull); });
     if (Cmd *c = cmd(cb)) {
         c->cull = cull;
         c->bound = nullptr;
@@ -882,7 +921,7 @@ void WebGpuDevice::set_cull(CommandBuffer cb, Cull cull) {
 }
 void WebGpuDevice::set_viewport(CommandBuffer cb, const Viewport &v) {
     if (off_main())
-        return on_main_void([&] { set_viewport(cb, v); });
+        return on_main_void([=, this] { set_viewport(cb, v); });
     if (Cmd *c = cmd(cb)) {
         c->viewport = v;
         c->viewport_set = true;
@@ -890,13 +929,19 @@ void WebGpuDevice::set_viewport(CommandBuffer cb, const Viewport &v) {
 }
 void WebGpuDevice::set_vertex_buffer(CommandBuffer cb, int slot, Buffer b, uint64_t offset) {
     if (off_main())
-        return on_main_void([&] { set_vertex_buffer(cb, slot, b, offset); });
+        return on_main_void([=, this] { set_vertex_buffer(cb, slot, b, offset); });
     set_buffer(cb, Stage::Vertex, slot, b, offset);
 }
 void WebGpuDevice::set_bytes(CommandBuffer cb, Stage stage, int slot, const void *bytes,
                              uint64_t count) {
     if (off_main())
-        return on_main_void([&] { set_bytes(cb, stage, slot, bytes, count); });
+        {
+            std::vector<uint8_t> copy(static_cast<const uint8_t *>(bytes),
+                                      static_cast<const uint8_t *>(bytes) + count);
+            return on_main_void([=, this, copy = std::move(copy)] {
+                set_bytes(cb, stage, slot, copy.data(), copy.size());
+            });
+        }
     Cmd *c = cmd(cb);
     const int i =
         stage == Stage::Compute ? (slot >= 0 && slot < 8 ? slot : -1) : binding_index(stage, slot);
@@ -907,7 +952,7 @@ void WebGpuDevice::set_bytes(CommandBuffer cb, Stage stage, int slot, const void
 }
 void WebGpuDevice::set_buffer(CommandBuffer cb, Stage stage, int slot, Buffer b, uint64_t offset) {
     if (off_main())
-        return on_main_void([&] { set_buffer(cb, stage, slot, b, offset); });
+        return on_main_void([=, this] { set_buffer(cb, stage, slot, b, offset); });
     Cmd *c = cmd(cb);
     const int i =
         stage == Stage::Compute ? (slot >= 0 && slot < 8 ? slot : -1) : binding_index(stage, slot);
@@ -919,7 +964,7 @@ void WebGpuDevice::set_buffer(CommandBuffer cb, Stage stage, int slot, Buffer b,
 }
 void WebGpuDevice::set_texture(CommandBuffer cb, Stage stage, int slot, Texture t) {
     if (off_main())
-        return on_main_void([&] { set_texture(cb, stage, slot, t); });
+        return on_main_void([=, this] { set_texture(cb, stage, slot, t); });
     Cmd *c = cmd(cb);
     auto it = textures_.find(t.id);
     if (!c || slot < 0 || slot > 3 || it == textures_.end())
@@ -929,7 +974,7 @@ void WebGpuDevice::set_texture(CommandBuffer cb, Stage stage, int slot, Texture 
 }
 void WebGpuDevice::set_sampler(CommandBuffer cb, Stage stage, int slot, const SamplerState &s) {
     if (off_main())
-        return on_main_void([&] { set_sampler(cb, stage, slot, s); });
+        return on_main_void([=, this] { set_sampler(cb, stage, slot, s); });
     Cmd *c = cmd(cb);
     if (!c || slot < 0 || slot > 3)
         return;
@@ -981,7 +1026,7 @@ void WebGpuDevice::bind(Cmd &c, bool compute) {
 
 void WebGpuDevice::draw(CommandBuffer cb, Primitive primitive, int first, int count) {
     if (off_main())
-        return on_main_void([&] { draw(cb, primitive, first, count); });
+        return on_main_void([=, this] { draw(cb, primitive, first, count); });
     Cmd *c = cmd(cb);
     if (!c || !c->pass || count <= 0)
         return;
@@ -1008,7 +1053,7 @@ void WebGpuDevice::draw(CommandBuffer cb, Primitive primitive, int first, int co
 
 void WebGpuDevice::dispatch_threads(CommandBuffer cb, int tx, int ty, int gx, int gy) {
     if (off_main())
-        return on_main_void([&] { dispatch_threads(cb, tx, ty, gx, gy); });
+        return on_main_void([=, this] { dispatch_threads(cb, tx, ty, gx, gy); });
     if (gx <= 0 || gy <= 0)
         return;
     dispatch_groups(cb, (tx + gx - 1) / gx, (ty + gy - 1) / gy, gx, gy);
@@ -1016,7 +1061,7 @@ void WebGpuDevice::dispatch_threads(CommandBuffer cb, int tx, int ty, int gx, in
 
 void WebGpuDevice::dispatch_groups(CommandBuffer cb, int groups_x, int groups_y, int gx, int gy) {
     if (off_main())
-        return on_main_void([&] { dispatch_groups(cb, groups_x, groups_y, gx, gy); });
+        return on_main_void([=, this] { dispatch_groups(cb, groups_x, groups_y, gx, gy); });
     Cmd *c = cmd(cb);
     if (!c || !c->compute || groups_x <= 0 || groups_y <= 0)
         return;
@@ -1163,7 +1208,7 @@ void WebGpuDevice::generate_mipmaps(CommandBuffer, Texture) {
 
 void WebGpuDevice::on_complete(CommandBuffer cb, std::function<void(CommandStatus, double)> fn) {
     if (off_main())
-        return on_main_void([&] { on_complete(cb, std::move(fn)); });
+        return on_main_now([&] { on_complete(cb, std::move(fn)); });
     if (Cmd *c = cmd(cb)) {
         c->callbacks.push_back(std::move(fn));
         return;
@@ -1202,7 +1247,7 @@ void WebGpuDevice::later(std::function<void()> fn) {
 
 void WebGpuDevice::commit(CommandBuffer cb) {
     if (off_main())
-        return on_main_void([&] { commit(cb); });
+        return on_main_now([&] { commit(cb); });
     auto it = recording_.find(cb.id);
     if (it == recording_.end())
         return;
@@ -1290,7 +1335,7 @@ Swapchain WebGpuDevice::create_swapchain(void *native_surface, int width, int he
 
 void WebGpuDevice::resize(Swapchain s, int width, int height) {
     if (off_main())
-        return on_main_void([&] { resize(s, width, height); });
+        return on_main_now([&] { resize(s, width, height); });
     auto it = chains_.find(s.id);
     if (it == chains_.end() || width <= 0 || height <= 0)
         return;
@@ -1350,14 +1395,14 @@ Texture WebGpuDevice::acquire(Swapchain s) {
 
 void WebGpuDevice::release_drawable(Swapchain s, Texture t) {
     if (off_main())
-        return on_main_void([&] { release_drawable(s, t); });
+        return on_main_now([&] { release_drawable(s, t); });
     destroy(t);
 }
 
 void WebGpuDevice::present(CommandBuffer cb, Swapchain s, Texture t, double min_duration,
                            std::function<void(double)> presented) {
     if (off_main())
-        return on_main_void([&] { present(cb, s, t, min_duration, std::move(presented)); });
+        return on_main_now([&] { present(cb, s, t, min_duration, std::move(presented)); });
     // The browser shows the canvas's current texture when this task returns.
     commit(cb);
     destroy(t);
@@ -1372,7 +1417,7 @@ double WebGpuDevice::refresh_period(Swapchain) {
 
 void WebGpuDevice::destroy(Swapchain s) {
     if (off_main())
-        return on_main_void([&] { destroy(s); });
+        return on_main_now([&] { destroy(s); });
     auto it = chains_.find(s.id);
     if (it == chains_.end())
         return;
