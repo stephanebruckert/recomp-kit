@@ -130,30 +130,47 @@ async function dirForStamp(id) {
 }
 
 // A streamed game keeps what it downloads in this browser and fills in the
-// rest in the background; show how much is local until all of it is.
+// rest in the background: a bar shows how much of the whole game is saved
+// locally (bytes, %, download speed) until all of it is, and says so once.
 if (typeof BroadcastChannel === "function") {
-  const streamEl = document.getElementById("stream");
-  let saved = "", downloading = false;
+  const box = document.getElementById("stream");
+  const label = document.getElementById("stream-label");
+  const fill = document.getElementById("stream-fill");
+  const mb = (b) => (b / 1048576).toFixed(0);
+  let last = null, waiting = false, waitRate = 0, rate = 0, prev = null, hideTimer = 0;
+  const render = () => {
+    if (!last || !last.total) return;
+    const done = last.filled >= last.total;
+    const pct = Math.min(100, Math.floor(100 * last.filled / last.total));
+    box.hidden = false;
+    box.classList.toggle("done", done);
+    box.classList.toggle("waiting", waiting && !done);
+    fill.style.width = `${pct}%`;
+    const speed = waiting ? waitRate : rate;
+    label.textContent = done
+      ? `Game saved to this browser (${mb(last.total)} MB): plays offline`
+      : `${waiting ? "Loading game data" : "Downloading the game"}: ${pct}% · ` +
+        `${mb(last.filled)} / ${mb(last.total)} MB` + (speed > 0 ? ` · ${(speed / 1e6).toFixed(1)} MB/s` : "");
+    clearTimeout(hideTimer);
+    if (done) hideTimer = setTimeout(() => { box.hidden = true; }, 4000);
+  };
   new BroadcastChannel("recomp-stream").onmessage = ({ data }) => {
     if (!data) return;
     if ("waiting" in data) {
-      downloading = data.waiting;
-      if (downloading) {
-        streamEl.hidden = false;
-        streamEl.textContent = `Downloading game data… ${(data.rate / 1e6).toFixed(1)} MB/s`;
-      } else {
-        streamEl.hidden = !saved;
-        streamEl.textContent = saved;
-      }
+      waiting = data.waiting;
+      waitRate = data.rate || 0;
+      render();
       return;
     }
-    if (!data.total) return;
-    saved = data.cached && data.filled < data.total
-      ? `Saving game data to this browser: ${Math.floor(100 * data.filled / data.total)}%` : "";
-    if (!downloading) {
-      streamEl.hidden = !saved;
-      streamEl.textContent = saved;
-    }
+    if (!data.total || !data.cached) return;
+    const now = performance.now();
+    if (prev && now > prev.t) rate = Math.max(0, (data.network - prev.network) * 1000 / (now - prev.t));
+    prev = { t: now, network: data.network };
+    const first = !last;
+    last = data;
+    // Already complete when the page opened: nothing to show.
+    if (first && data.filled >= data.total) return;
+    render();
   };
 }
 

@@ -3,5 +3,11 @@ html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 14px 
   #status { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
             text-align: center; padding: 0 16px; white-space: pre-line; pointer-events: none; }
   #status a { pointer-events: auto; color: #8cf; }
-  #stream { position: fixed; left: 8px; bottom: 8px; padding: 3px 8px; border-radius: 4px;
-            background: rgba(0, 0, 0, .55); color: #bbb; font-size: 12px; pointer-events: none; }
+  #stream { position: fixed; left: 8px; bottom: 8px; width: min(320px, calc(100vw - 32px));
+            padding: 6px 8px 7px; border-radius: 6px; background: rgba(0, 0, 0, .62); color: #ccc;
+            font-size: 12px; font-variant-numeric: tabular-nums; pointer-events: none; }
+  #stream-label { margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #stream-track { height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .15); overflow: hidden; }
+  #stream-fill { height: 100%; width: 0; border-radius: 3px; background: #4c9dff; transition: width .4s; }
+  #stream.waiting #stream-fill { background: #ffb84c; }
+  #stream.done #stream-fill { background: #4cd07d; }
