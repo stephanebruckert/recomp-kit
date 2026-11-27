@@ -383,6 +383,13 @@ void ui_layer_extract(HostFrameHandle f, int guest_w, int guest_h, const UiFrame
     std::vector<uint64_t> seeds;
     for (const auto &group : groups) {
         const auto &first = *group.front();
+        // A blit of an off-screen scene onto the screen (a game presenting
+        // its 3D target by blitting it, under render_target_write_only) is the
+        // world itself: the GPU target already holds that picture at full
+        // resolution, and the guest's copy of it has no 3D in it.
+        if (first.src.surface != HOST_SURFACE_NONE && first.src.surface != HOST_SRC_CPU &&
+            host_scene_is_offscreen(first.src.surface))
+            continue;
         Rect bounds = rect(first);
         UiElement e{};
         e.src = first.src.surface;

@@ -185,6 +185,10 @@ struct HostAudioPlay {
     int32_t pan;           // hundredths of a dB, -10000..10000
     uint32_t start_offset; // bytes into pcm
 };
+// Whether a Direct3D target is drawn off screen and shown by the game blitting
+// it onto its screen, under [direct3d] render_target_write_only. Such a world
+// keeps the game's own width and is presented boxed at its aspect.
+int host_scene_is_offscreen(uint32_t surface);
 void host_audio_play(const HostAudioPlay *p);
 // Turns a looping channel into an appendable stream, continuing from where it
 // has reached rather than starting again: the remainder of the current lap is

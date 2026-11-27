@@ -3837,6 +3837,10 @@ static void test_frame_targets_are_leased(D3DRenderer *renderer) {
 
 static uint64_t g_t5_legacy_frame = 0;
 static HostDrawMapping g_t5_mapping = HOST_MAPPING_SCENE;
+// No render_target_write_only game in these tests: every scene is on screen.
+extern "C" int host_scene_is_offscreen(uint32_t) {
+    return 0;
+}
 extern "C" int host_frame_legacy(HostFrameHandle f) {
     return f.id == g_t5_legacy_frame;
 }

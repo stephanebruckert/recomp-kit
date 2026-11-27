@@ -8315,7 +8315,11 @@ static void test_render_target_write_only() {
     dirty();
     CHECK_EQ(call_method(primary, S_Blt, {0, g_t3_target, 0, DDBLT_KEYSRC | DDBLT_WAIT, 0}), DD_OK);
     CHECK_EQ(host_readback_count_for_test(), before + 1);
+    // The off-screen target is presented boxed; the screen itself is not off screen.
+    CHECK_EQ(host_scene_is_offscreen(rt->id), 1);
+    CHECK_EQ(host_scene_is_offscreen(rec_obj(primary)->id), 0);
     ddraw_set_render_target_write_only(false);
+    CHECK_EQ(host_scene_is_offscreen(rt->id), 0);
     dirty();
     lock_unlock();
     CHECK_EQ(host_readback_count_for_test(), before + 2);

@@ -1913,6 +1913,7 @@ void D3DRenderer::Impl::sealFrame(uint64_t f) {
                             float(slot.presentTarget.h) / in.guest_h, 0, 0, domain};
                 in.legacy =
                     mods_display_classic() || host_frame_legacy({f}) || slot.materializedLayers;
+                in.offscreen_scene = host_scene_is_offscreen(slot.surface.id) != 0;
                 ++g_composited[in.legacy ? (mods_display_classic()        ? 1
                                             : host_frame_legacy({f})    ? 2
                                                                         : 3)
@@ -2501,7 +2502,11 @@ void D3DRenderer::Impl::draw(const HostD3DDraw *cmd, uint32_t revision) {
     if (active_slot_ >= 0 && !overlay_rendering_ && !replaying_ && !mods_display_classic() &&
         !slots_[active_slot_].materializedLayers &&
         !host_frame_legacy({slots_[active_slot_].frame})) {
-        domain = mods_display_scene_width(guest_width_, guest_height_);
+        // An off-screen target the game blits onto its 4:3 screen keeps the
+        // game's width: widened, it would no longer line up with that screen.
+        domain = host_scene_is_offscreen(slots_[active_slot_].surface.id)
+                     ? guest_width_
+                     : mods_display_scene_width(guest_width_, guest_height_);
         slots_[active_slot_].scene_domain_w = domain;
         if (domain != guest_width_) {
             mapped = *cmd;

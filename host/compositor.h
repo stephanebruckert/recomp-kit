@@ -60,6 +60,9 @@ struct CompositorInput {
     // Wide view off: the scene was projected at the guest's aspect, so on a
     // wider drawable it is boxed at that aspect with its HUD and input.
     bool narrow = false;
+    // The world was drawn into an off-screen target the game blits onto its
+    // own 4:3 screen (render_target_write_only): shown boxed like narrow.
+    bool offscreen_scene = false;
 };
 
 // Encode only: never commits, waits or presents. The caller supplies an open

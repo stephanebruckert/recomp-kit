@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cstdio>
 
+// ui_layer asks whether a blit source is an off-screen scene; none is here.
+extern "C" int host_scene_is_offscreen(uint32_t) {
+    return 0;
+}
+
 static int checks = 0, failures = 0;
 #define CHECK(x)                                                                                   \
     do {                                                                                           \

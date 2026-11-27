@@ -5058,3 +5058,10 @@ extern "C" void ddraw_gdi_end_primary(uint32_t dc) {
 void ddraw_set_render_target_write_only(bool on) {
     g_rt_write_only = on;
 }
+
+int host_scene_is_offscreen(uint32_t surface) {
+    if (!g_rt_write_only)
+        return 0;
+    const ComObj *s = com_get(surface);
+    return s && s->kind == K_SURFACE && !surface_is_on_screen(s) ? 1 : 0;
+}
