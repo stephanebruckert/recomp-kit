@@ -98,9 +98,13 @@ def export_listings(ghidra, java_home, annotations, cfg):
     output.mkdir(parents=True, exist_ok=True)
     command = [
         ghidra / "support/analyzeHeadless", project, cfg["game"]["app_name"],
-        "-import", cfg["developer_exe_path"], "-noanalysis", "-deleteProject",
+        "-import", cfg["developer_exe_path"], "-deleteProject",
         "-scriptPath", ROOT / "tools",
     ]
+    # Annotations carry their own function list; without them Ghidra's
+    # auto-analysis is what discovers the functions.
+    if annotations is not None:
+        command.insert(command.index("-deleteProject"), "-noanalysis")
     if annotations is not None:
         command += ["-postScript", "ImportAnnotations.java", annotations]
     command += ["-postScript", "ExportProgram.java", output]
