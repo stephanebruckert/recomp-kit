@@ -1370,6 +1370,20 @@ static void test_files(X86 *c) {
     check(call_import(c, "KERNEL32.dll", "GetLastError", {}) == 2,
           "GetLastError is ERROR_FILE_NOT_FOUND");
 
+    // GetDriveTypeA: the drives game.toml lists as cd_drives are CD-ROMs
+    // (TOCA runs network-only otherwise); any other drive is fixed.
+    for (const char *d = RECOMP_CD_DRIVES; *d; ++d) {
+        char root[4] = {*d, ':', '\\', 0};
+        check(call_import(c, "KERNEL32.dll", "GetDriveTypeA", {put_str(root)}) == 5,
+              "a cd_drives letter is DRIVE_CDROM");
+        root[0] = (char)tolower((unsigned char)*d);
+        check(call_import(c, "KERNEL32.dll", "GetDriveTypeA", {put_str(root)}) == 5,
+              "a cd_drives letter in lower case is DRIVE_CDROM");
+    }
+    if (!strchr(RECOMP_CD_DRIVES, 'C'))
+        check(call_import(c, "KERNEL32.dll", "GetDriveTypeA", {put_str("C:\\")}) == 3,
+              "C: is DRIVE_FIXED");
+
     // OpenFile, the 16-bit era open: OF_EXIST, OF_READ handles that work with
     // ReadFile, HFILE_ERROR and the OFSTRUCT error code for a missing file.
     uint32_t of = scratch_block(136);

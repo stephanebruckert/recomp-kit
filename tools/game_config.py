@@ -357,6 +357,12 @@ def load(game_dir):
     setup_dirs = cfg.setdefault("setup", {}).setdefault("required_dirs", [])
     if not isinstance(setup_dirs, list):
         raise ValueError("%s: [setup] required_dirs must be a list" % source)
+    # Drive letters GetDriveTypeA reports as CD-ROM: a game that checks its
+    # disc by drive type runs a reduced mode when no drive is one.
+    cd_drives = cfg["setup"].setdefault("cd_drives", [])
+    if not isinstance(cd_drives, list) or not all(
+            isinstance(d, str) and len(d) == 1 and d.isalpha() for d in cd_drives):
+        raise ValueError("%s: [setup] cd_drives must be a list of drive letters" % source)
     globals_path = game_dir / translate.get("globals", "globals.toml")
     with globals_path.open("rb") as fh:
         cfg["globals"] = tomllib.load(fh).get("globals", {})

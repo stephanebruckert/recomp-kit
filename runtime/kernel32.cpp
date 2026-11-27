@@ -5475,9 +5475,12 @@ void disk_free_space(X86 *c) {
     set_eax(c, 1);
 }
 
+// Every drive maps onto the game directory; the ones game.toml lists in
+// [setup] cd_drives answer as CD-ROM so a disc check by drive type passes.
 void drive_type_named(X86 *c, const std::string &root) {
-    (void)root;
-    set_eax(c, 3); // DRIVE_FIXED
+    const char letter = root.size() >= 2 && root[1] == ':' ? (char)toupper((unsigned char)root[0]) : 0;
+    const bool cd = letter && strchr(RECOMP_CD_DRIVES, letter) != nullptr;
+    set_eax(c, cd ? 5 : 3); // DRIVE_CDROM : DRIVE_FIXED
 }
 
 void logical_drive_strings(X86 *c, bool wide) {
