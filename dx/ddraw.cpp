@@ -3372,12 +3372,11 @@ void Surface_Lock(X86 *c) {
     }
     uint32_t p = s->pixels + (uint32_t)off;
     bool v2 = desc_is_v2(desc, this_is_v2_iface(c));
+    // A partial lock moves lpSurface to the rectangle but still reports the
+    // whole surface's width and height, as DirectDraw (and Wine) do. TOCA's
+    // glyph copy bounds sheet coordinates by these, so reporting the
+    // rectangle's extent drew only the glyph at the sheet's origin.
     fill_desc(desc, s, v2, p);
-    // A partial lock reports the sub-rectangle's extent, as DirectDraw does.
-    if (rect_addr) {
-        wr32(desc + DDSD_OFF_dwWidth, (uint32_t)(r[2] - r[0]));
-        wr32(desc + DDSD_OFF_dwHeight, (uint32_t)(r[3] - r[1]));
-    }
     // What this region holds now, so Unlock can record what the guest's own
     // stores changed. EVERY accepted lock, not only the outermost: a nested
     // lock can name a different rectangle, and one taken beneath a read-only

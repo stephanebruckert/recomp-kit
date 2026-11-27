@@ -8911,10 +8911,16 @@ static void test_partial_lock_bottom_edge() {
     wr32(ld + DDSD_OFF_dwSize, SDK_DDSURFACEDESC);
     uint32_t hr = call_method(surf, S_Lock, {rect, ld, DDLOCK_WAIT, 0});
     CHECK_EQ(hr, DD_OK);
-    CHECK_EQ(rd32(ld + DDSD_OFF_dwWidth), 32u);
-    CHECK_EQ(rd32(ld + DDSD_OFF_dwHeight), 4u);
+    // The pointer moves to the rectangle; the size stays the surface's.
+    CHECK_EQ(rd32(ld + DDSD_OFF_dwWidth), 64u);
+    CHECK_EQ(rd32(ld + DDSD_OFF_dwHeight), 64u);
     uint32_t p = rd32(ld + DDSD_OFF_lpSurface);
     CHECK(p != 0);
+    gm_zero(sc(0x380), SDK_DDSURFACEDESC);
+    wr32(sc(0x380) + DDSD_OFF_dwSize, SDK_DDSURFACEDESC);
+    CHECK_EQ(call_method(surf, S_Lock, {0, sc(0x380), DDLOCK_WAIT, 0}), DD_OK);
+    CHECK_EQ(p, rd32(sc(0x380) + DDSD_OFF_lpSurface) + 60 * rd32(ld + DDSD_OFF_lPitch) + 32);
+    CHECK_EQ(call_method(surf, S_Unlock, {0}), DD_OK);
     // The last row of the region is writable, which is what the bound governs.
     uint32_t pitch = rd32(ld + DDSD_OFF_lPitch);
     wr8(p + 3 * pitch + 31, 0xAB);
