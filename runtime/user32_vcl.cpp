@@ -626,6 +626,11 @@ void keyboard_state(X86 *c) {
         memcpy(g_mem + p, g_key_state, 256);
     set_eax(c, ok);
 }
+// SetKeyboardState: games use it to clear stuck keys; the host owns the key
+// state, so the request is accepted and the next input event wins.
+void set_keyboard_state(X86 *c) {
+    set_eax(c, arg(c, 0) != 0);
+}
 void layout_list(X86 *c) {
     uint32_t n = arg(c, 0), p = arg(c, 1);
     if (n && p && gm_valid(p, 4))
@@ -1408,6 +1413,7 @@ const ImportShim shims[] = {
     U("GetCursor", 0, get_cursor),
     U("GetMessageExtraInfo", 0, zero),
     U("GetKeyboardState", 1, keyboard_state),
+    U("SetKeyboardState", 1, set_keyboard_state),
     U("GetKeyboardLayoutList", 2, layout_list),
     U("ActivateKeyboardLayout", 2, activate_layout),
     U("MsgWaitForMultipleObjects", 5, message_wait_plain),

@@ -1370,6 +1370,21 @@ static void test_files(X86 *c) {
     check(call_import(c, "KERNEL32.dll", "GetLastError", {}) == 2,
           "GetLastError is ERROR_FILE_NOT_FOUND");
 
+    // OpenFile, the 16-bit era open: OF_EXIST, OF_READ handles that work with
+    // ReadFile, HFILE_ERROR and the OFSTRUCT error code for a missing file.
+    uint32_t of = scratch_block(136);
+    check(call_import(c, "KERNEL32.dll", "OpenFile", {name, of, 0x4000}) == 1,
+          "OpenFile(OF_EXIST) finds the executable");
+    check(g_mem[of] == 136 && rd16(of + 2) == 0, "OFSTRUCT has cBytes 136 and no error");
+    uint32_t hf = call_import(c, "KERNEL32.dll", "OpenFile", {name, of, 0});
+    check(hf != 0xffffffffu && call_import(c, "KERNEL32.dll", "ReadFile", {hf, buf, 8, read_count, 0}) == 1 &&
+              memcmp(host, g_mem + buf, 8) == 0,
+          "OpenFile(OF_READ) gives a handle ReadFile reads the executable through");
+    check(call_import(c, "KERNEL32.dll", "CloseHandle", {hf}) == 1, "CloseHandle of an OpenFile handle");
+    check(call_import(c, "KERNEL32.dll", "OpenFile", {missing, of, 0x4000}) == 0xffffffffu &&
+              rd16(of + 2) == 2,
+          "OpenFile of a missing file gives HFILE_ERROR and nErrCode ERROR_FILE_NOT_FOUND");
+
     uint32_t dirname = put_str(RECOMP_GUEST_ROOT);
     uint32_t attributes = call_import(c, "KERNEL32.dll", "GetFileAttributesA", {dirname});
     check(attributes != 0xffffffffu && (attributes & 0x10),

@@ -980,6 +980,62 @@ void k_CloseHandle(X86 *c) {
     set_eax(c, 1);
 }
 
+// OpenFile(name, OFSTRUCT*, style): the 16-bit era open, still used by 90s
+// games for real file I/O (HFILE doubles as a Win32 handle). Translated into a
+// CreateFileA call on a scratch frame below the guest stack so files keep one
+// code path. OF_EXIST opens and closes; OF_PARSE only fills the OFSTRUCT.
+void k_DeleteFileA(X86 *c);
+void k_OpenFile(X86 *c) {
+    std::string name = gm_str(arg(c, 0));
+    uint32_t of = arg(c, 1), style = arg(c, 2);
+    auto fill = [&](uint32_t err) {
+        if (of && gm_valid(of, 136)) {
+            memset(g_mem + of, 0, 136);
+            g_mem[of] = 136; // cBytes
+            g_mem[of + 1] = 1; // fFixedDisk
+            wr16(of + 2, (uint16_t)err);
+            gm_put_str(of + 8, name.c_str(), 128); // szPathName
+        }
+    };
+    if (style & 0x0100) { // OF_PARSE
+        fill(0);
+        set_eax(c, 0);
+        return;
+    }
+    if (style & 0x0200) { // OF_DELETE
+        X86 t = *c;
+        t.r[R_ESP] = c->r[R_ESP] - 64;
+        wr32(t.r[R_ESP] + 4, arg(c, 0));
+        k_DeleteFileA(&t);
+        bool ok = t.r[R_EAX] != 0;
+        fill(ok ? 0 : get_last_error());
+        set_eax(c, ok ? 1 : 0xffffffffu);
+        return;
+    }
+    uint32_t mode = style & 3, access = mode == 1 ? 0x40000000u : mode == 2 ? 0xc0000000u : 0x80000000u;
+    X86 t = *c;
+    t.r[R_ESP] = c->r[R_ESP] - 64;
+    const uint32_t args[7] = {arg(c, 0), access, 3 /* share read|write */, 0,
+                              (style & 0x1000) ? 2u /* CREATE_ALWAYS */ : 3u /* OPEN_EXISTING */, 0x80, 0};
+    for (int a = 0; a < 7; a++)
+        wr32(t.r[R_ESP] + 4 + 4 * a, args[a]);
+    create_file_named(&t, name);
+    uint32_t h = t.r[R_EAX];
+    if (h == INVALID_HANDLE_VALUE_) {
+        fill(get_last_error());
+        set_eax(c, 0xffffffffu); // HFILE_ERROR
+        return;
+    }
+    fill(0);
+    if (style & 0x4000) { // OF_EXIST
+        wr32(t.r[R_ESP] + 4, h);
+        k_CloseHandle(&t);
+        set_eax(c, 1);
+        return;
+    }
+    set_eax(c, h);
+}
+
 void k_FlushFileBuffers(X86 *c) {
     HObj *o = handle_get(arg(c, 0), H_FILE);
     if (o)
@@ -5867,6 +5923,7 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
     {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
     {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
+    {"KERNEL32.dll", "OpenFile", 3, k_OpenFile},
     {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
     {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
     {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},
