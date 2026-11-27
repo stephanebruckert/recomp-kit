@@ -75,6 +75,7 @@ struct TextureUpload {
     int32_t width = 0, height = 0, pitch = 0, bpp = 0;
     uint32_t rmask = 0, gmask = 0, bmask = 0, amask = 0;
     bool has_palette = false;
+    bool has_colorkey = false;
     uint32_t palette[256] = {0};
     std::vector<uint8_t> pixels;
 };
@@ -354,6 +355,7 @@ void host_d3d_texture(const HostD3DTexture *t) {
     u.bmask = t->bmask;
     u.amask = t->amask;
     u.has_palette = t->palette != nullptr;
+    u.has_colorkey = t->has_colorkey != 0;
     if (t->palette)
         memcpy(u.palette, t->palette, sizeof u.palette);
     if (t->pixels && t->height > 0 && t->pitch > 0)
@@ -4874,6 +4876,20 @@ static void test_palette_write_bumps_a_texture_revision() {
     CHECK(g_uploads.size() > uploads_before);
     CHECK_EQ(g_uploads.back().handle, handle);
     CHECK_EQ(g_uploads.back().revision, after);
+
+    // A source colour key set after the texture was sent reaches the renderer
+    // (TOCA keys its textures after Load); setting the same key again does not
+    // send it twice.
+    uint32_t key = sc(0x1b00);
+    wr32(key, 0);
+    wr32(key + 4, 0);
+    uploads_before = g_uploads.size();
+    CHECK_EQ(call_method(texsurf, S_SetColorKey, {DDCKEY_SRCBLT, key}), DD_OK);
+    CHECK(g_uploads.size() > uploads_before);
+    CHECK(!g_uploads.empty() && g_uploads.back().handle == handle && g_uploads.back().has_colorkey);
+    uploads_before = g_uploads.size();
+    CHECK_EQ(call_method(texsurf, S_SetColorKey, {DDCKEY_SRCBLT, key}), DD_OK);
+    CHECK_EQ(g_uploads.size(), uploads_before);
 }
 
 // A draw can name a revision the renderer never received without anything
@@ -8218,6 +8234,97 @@ static void test_find_device_literal() {
 
 // Direct3D 5 execute buffers through the version 1 device a DX5 game reaches
 // by QueryInterface on its Device2. Literal IIDs and slot numbers, as above.
+// D3DVT_VERTEX draws are lit from the material, ambient and viewport lights
+// and reach the renderer as D3DVT_LVERTEX: a red material under a white light
+// from above is red where the normal faces up and black where it faces away.
+static void test_d3d_vertex_lighting() {
+    cpu_reset();
+    g_draws.clear();
+    uint32_t target = make_render_target_for_test(640, 480, 16);
+    uint32_t dd = rec_dd(), iid = sc(0x40), out = sc(0x60);
+    const uint8_t iid_d3d2[16] = {0xC1, 0x1E, 0xAE, 0x6A, 0x2A, 0x66, 0xD0, 0x11,
+                                  0x88, 0x9D, 0x00, 0xAA, 0x00, 0xBB, 0xB7, 0x6A};
+    const uint8_t hal[16] = {0xe0, 0x3d, 0xe6, 0x84, 0xaa, 0x46, 0xcf, 0x11,
+                             0x81, 0x6f, 0,    0,    0xc0, 0x20, 0x15, 0x6e};
+    memcpy(gm_ptr(iid), iid_d3d2, 16);
+    CHECK_EQ(call_method(dd, 0, {iid, out}), S_OK);
+    uint32_t d3d2 = rd32(out);
+    memcpy(gm_ptr(iid), hal, 16);
+    CHECK_EQ(call_method(d3d2, 8, {iid, target, out}), D3D_OK_); // CreateDevice
+    uint32_t dev = rd32(out);
+    CHECK_EQ(call_method(d3d2, 6, {out, 0}), D3D_OK_); // CreateViewport
+    uint32_t vp = rd32(out);
+    CHECK_EQ(call_method(dev, 6, {vp}), D3D_OK_);  // AddViewport
+    CHECK_EQ(call_method(dev, 13, {vp}), D3D_OK_); // SetCurrentViewport
+
+    CHECK_EQ(call_method(d3d2, 4, {out, 0}), D3D_OK_); // CreateLight
+    uint32_t light = rd32(out), ld = sc(0x100);
+    gm_zero(ld, 80);
+    wr32(ld, 80);    // D3DLIGHT2
+    wr32(ld + 4, 3); // D3DLIGHT_DIRECTIONAL
+    for (int k = 0; k < 4; ++k)
+        wrf32(ld + 8 + 4 * k, 1.0f);
+    wrf32(ld + 40, -1.0f); // direction (0, -1, 0): light from above
+    wr32(ld + 76, 1);      // D3DLIGHT_ACTIVE
+    CHECK_EQ(call_method(light, 4, {ld}), D3D_OK_); // SetLight
+    CHECK_EQ(call_method(vp, 13, {light}), D3D_OK_); // AddLight
+
+    CHECK_EQ(call_method(d3d2, 5, {out, 0}), D3D_OK_); // CreateMaterial
+    uint32_t mat = rd32(out), md = sc(0x180);
+    gm_zero(md, 80);
+    wr32(md, 80);
+    wrf32(md + 4, 1.0f);  // diffuse red
+    wrf32(md + 16, 1.0f); // diffuse alpha
+    CHECK_EQ(call_method(mat, 3, {md}), D3D_OK_);         // SetMaterial
+    CHECK_EQ(call_method(mat, 5, {dev, out}), D3D_OK_);   // GetHandle
+    CHECK_EQ(call_method(dev, 25, {1, rd32(out)}), D3D_OK_); // LIGHTSTATE_MATERIAL
+    CHECK_EQ(call_method(dev, 25, {2, 0}), D3D_OK_);         // LIGHTSTATE_AMBIENT
+
+    uint32_t v = sc(0x400);
+    gm_zero(v, 96);
+    const float normals_y[3] = {1, 1, -1};
+    for (int i = 0; i < 3; ++i) {
+        wrf32(v + 32 * i + 0, float(i));
+        wrf32(v + 32 * i + 16, normals_y[i]);
+        wrf32(v + 32 * i + 24, 0.25f); // tu survives
+    }
+    CHECK_EQ(call_method(dev, 10, {}), D3D_OK_); // BeginScene
+    CHECK_EQ(call_method(dev, 29, {4 /*TRIANGLELIST*/, 1 /*VERTEX*/, v, 3, 0}), D3D_OK_);
+    CHECK_EQ(call_method(dev, 11, {}), D3D_OK_); // EndScene
+    CHECK_EQ(g_draws.size(), 1u);
+    if (!g_draws.empty()) {
+        const DrawRecord &d = g_draws[0];
+        CHECK_EQ(d.vertex_type, 2u); // D3DVT_LVERTEX
+        uint32_t c0, c2;
+        float tu;
+        memcpy(&c0, d.vertices.data() + 16, 4);
+        memcpy(&c2, d.vertices.data() + 64 + 16, 4);
+        memcpy(&tu, d.vertices.data() + 24, 4);
+        CHECK_EQ(c0, 0xffff0000u);
+        CHECK_EQ(c2, 0xff000000u);
+        CHECK(tu == 0.25f);
+    }
+    // An ambient with zero RGB gives its level in the top byte: the face away
+    // from the light is grey, not black.
+    g_draws.clear();
+    gm_zero(md, 80);
+    wr32(md, 80);
+    for (int k = 0; k < 4; ++k) {
+        wrf32(md + 4 + 4 * k, 1.0f);
+        wrf32(md + 20 + 4 * k, 1.0f); // ambient reflectance
+    }
+    CHECK_EQ(call_method(mat, 3, {md}), D3D_OK_);
+    CHECK_EQ(call_method(dev, 25, {2, 0x40000000u}), D3D_OK_);
+    CHECK_EQ(call_method(dev, 10, {}), D3D_OK_);
+    CHECK_EQ(call_method(dev, 29, {4, 1, v, 3, 0}), D3D_OK_);
+    CHECK_EQ(call_method(dev, 11, {}), D3D_OK_);
+    if (!g_draws.empty()) {
+        uint32_t c2;
+        memcpy(&c2, g_draws[0].vertices.data() + 64 + 16, 4);
+        CHECK_EQ(c2, 0xff404040u);
+    }
+}
+
 static void test_d3d5_execute_buffer() {
     cpu_reset();
     g_draws.clear();
@@ -13220,6 +13327,7 @@ int main() {
         {"SetRenderTarget self", test_setrendertarget_same_surface},
         {"FindDevice, literal", test_find_device_literal},
         {"viewport record", test_viewport_record},
+        {"D3DVT_VERTEX lighting", test_d3d_vertex_lighting},
         {"Direct3D5 execute buffer", test_d3d5_execute_buffer},
         {"device description sizes", test_device_desc_sizes},
         {"GetDeviceData stride", test_device_data_stride16},

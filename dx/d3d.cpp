@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <iterator>
 #include <algorithm>
+#include <cmath>
 #include <array>
 
 #define IID_BYTES(a, b, c, d0, d1, d2, d3, d4, d5, d6, d7)                                         \
@@ -626,6 +627,130 @@ bool draw_inside(const HostD3DDrawSnapshot *d, int32_t x0, int32_t y0, int32_t x
 }
 
 // The one path every draw takes. `vertices` and `indices` are guest addresses.
+// Direct3D lighting for D3DVT_VERTEX, done here so the renderer receives
+// D3DVT_LVERTEX with the lit colour: the current material (D3DLIGHTSTATE_
+// MATERIAL), the ambient light state and the current viewport's lights, with
+// normals taken into world space. Only when the game set a material or lights;
+// otherwise the vertices go on unlit as before.
+//
+// Two readings follow TOCA, which is what they were measured against:
+// an ambient with zero RGB carries its level in the top byte (0xC0000000 is a
+// light grey; its locked-track maps use 0x40000000 to dim), and a point light
+// that also has a direction is treated as directional (its menu lights sit
+// far from the map, which strict point-light maths leaves black).
+static uint32_t rd32_host(const uint8_t *p) {
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+static float f32_at(const uint8_t *p, uint32_t off) {
+    float v;
+    memcpy(&v, p + off, 4);
+    return v;
+}
+static bool light_vertices(const ComObj *dev, uint8_t *verts, uint32_t count) {
+    const ComObj *mat = nullptr;
+    if (uint32_t h = dev->light_state[1]) { // D3DLIGHTSTATE_MATERIAL
+        const ComObj *m = object_for_handle(h);
+        if (m && m->kind == K_MATERIAL && m->blob.size() >= 68)
+            mat = m;
+    }
+    const ComObj *vp = dev->current_viewport ? com_get(dev->current_viewport) : nullptr;
+    struct L {
+        uint32_t type;
+        float color[3], pos[3], dir[3], range, att[3];
+    };
+    std::vector<L> lights;
+    if (vp)
+        for (uint32_t id : vp->lights) {
+            const ComObj *o = com_get(id);
+            if (!o || o->blob.size() < 68)
+                continue;
+            const uint8_t *b = o->blob.data();
+            // D3DLIGHT2 (80 bytes) has dwFlags; D3DLIGHT is always active.
+            if (o->blob.size() >= 80 && rd32_host(b + 76) && !(rd32_host(b + 76) & 1))
+                continue; // not D3DLIGHT_ACTIVE
+            L l{};
+            l.type = rd32_host(b + 4);
+            for (int k = 0; k < 3; ++k) {
+                l.color[k] = f32_at(b, 8 + 4 * k);
+                l.pos[k] = f32_at(b, 24 + 4 * k);
+                l.dir[k] = f32_at(b, 36 + 4 * k);
+                l.att[k] = f32_at(b, 56 + 4 * k);
+            }
+            l.range = f32_at(b, 48);
+            lights.push_back(l);
+        }
+    if (!mat && lights.empty())
+        return false;
+    uint32_t amb = dev->light_state[2]; // D3DLIGHTSTATE_AMBIENT
+    if (!(amb & 0xffffffu))
+        amb = (amb >> 24) * 0x010101u;
+    const float ambient[3] = {((amb >> 16) & 255) / 255.0f, ((amb >> 8) & 255) / 255.0f,
+                              (amb & 255) / 255.0f};
+    float diffuse[4] = {1, 1, 1, 1}, mamb[3] = {1, 1, 1}, emissive[3] = {0, 0, 0};
+    if (mat) {
+        const uint8_t *b = mat->blob.data();
+        for (int k = 0; k < 4; ++k)
+            diffuse[k] = f32_at(b, 4 + 4 * k);
+        for (int k = 0; k < 3; ++k) {
+            mamb[k] = f32_at(b, 20 + 4 * k);
+            emissive[k] = f32_at(b, 52 + 4 * k);
+        }
+    }
+    static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float *w = dev->transform_set[1] ? dev->transform[1] : identity; // WORLD, row-major
+    auto to255 = [](float v) { return (uint32_t)std::clamp((int)std::lround(v * 255), 0, 255); };
+    for (uint32_t i = 0; i < count; ++i) {
+        uint8_t *v = verts + i * 32;
+        float x = f32_at(v, 0), y = f32_at(v, 4), z = f32_at(v, 8);
+        float nx = f32_at(v, 12), ny = f32_at(v, 16), nz = f32_at(v, 20);
+        float wn[3] = {nx * w[0] + ny * w[4] + nz * w[8], nx * w[1] + ny * w[5] + nz * w[9],
+                       nx * w[2] + ny * w[6] + nz * w[10]};
+        float len = std::sqrt(wn[0] * wn[0] + wn[1] * wn[1] + wn[2] * wn[2]);
+        if (len > 0)
+            for (float &e : wn)
+                e /= len;
+        float wp[3] = {x * w[0] + y * w[4] + z * w[8] + w[12], x * w[1] + y * w[5] + z * w[9] + w[13],
+                       x * w[2] + y * w[6] + z * w[10] + w[14]};
+        float rgb[3];
+        for (int k = 0; k < 3; ++k)
+            rgb[k] = emissive[k] + ambient[k] * mamb[k];
+        for (const L &l : lights) {
+            bool has_dir = l.dir[0] != 0 || l.dir[1] != 0 || l.dir[2] != 0;
+            float lv[3], att = 1;
+            if (l.type == 3 || l.type == 4 || (l.type == 1 && has_dir)) { // DIRECTIONAL, PARALLELPOINT
+                for (int k = 0; k < 3; ++k)
+                    lv[k] = -l.dir[k];
+            } else {
+                for (int k = 0; k < 3; ++k)
+                    lv[k] = l.pos[k] - wp[k];
+                float d = std::sqrt(lv[0] * lv[0] + lv[1] * lv[1] + lv[2] * lv[2]);
+                if (l.range > 0 && d > l.range)
+                    continue;
+                float q = l.att[0] + l.att[1] * d + l.att[2] * d * d;
+                att = q > 0 ? 1 / q : 1;
+            }
+            float ll = std::sqrt(lv[0] * lv[0] + lv[1] * lv[1] + lv[2] * lv[2]);
+            if (ll <= 0)
+                continue;
+            float dot = (wn[0] * lv[0] + wn[1] * lv[1] + wn[2] * lv[2]) / ll;
+            if (dot <= 0)
+                continue;
+            for (int k = 0; k < 3; ++k)
+                rgb[k] += l.color[k] * diffuse[k] * dot * att;
+        }
+        uint32_t color = to255(diffuse[3]) << 24 | to255(rgb[0]) << 16 | to255(rgb[1]) << 8 |
+                         to255(rgb[2]);
+        // D3DLVERTEX: x y z reserved color specular tu tv; tu/tv stay at 24/28.
+        uint32_t zero = 0;
+        memcpy(v + 12, &zero, 4);
+        memcpy(v + 16, &color, 4);
+        memcpy(v + 20, &zero, 4);
+    }
+    return true;
+}
+
 void submit(X86 *c, ComObj *dev, uint32_t prim, uint32_t vtype, uint32_t vertices, uint32_t vcount,
             uint32_t indices, uint32_t icount) {
     uint32_t stride = d3d_vertex_stride(vtype);
@@ -684,6 +809,8 @@ void submit(X86 *c, ComObj *dev, uint32_t prim, uint32_t vtype, uint32_t vertice
     if (!d->vertices)
         return;
     memcpy((void *)d->vertices, gm_ptr(vertices), (size_t)vcount * stride);
+    if (vtype == D3DVT_VERTEX && light_vertices(dev, (uint8_t *)d->vertices, vcount))
+        d->fvf = D3DVT_LVERTEX;
     if (indices && icount) {
         void *ip = ddraw_frame_alloc(icount * 2u, 2);
         if (!ip)

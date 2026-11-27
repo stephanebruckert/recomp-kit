@@ -3448,11 +3448,26 @@ void Surface_SetColorKey(X86 *c) {
         return;
     }
     bool src = (flags & DDCKEY_SRCBLT) != 0;
+    // A texture's source key is part of what the renderer was sent: TOCA
+    // keys its textures after Load has uploaded them, and a key that never
+    // reached the renderer drew every tree as an opaque square.
+    const bool had = s->has_ckey_src;
+    const uint32_t had_lo = s->ckey_src_lo, had_hi = s->ckey_src_hi;
+    auto resend_if_key_changed = [&]() {
+        if (s->has_ckey_src == had && (!had || (s->ckey_src_lo == had_lo && s->ckey_src_hi == had_hi)))
+            return;
+        ddraw_after_write(s);
+        if (s->texture_handle)
+            d3d_upload_texture(s);
+        else
+            s->tex_dirty = true;
+    };
     if (!ck) {
         if (src)
             s->has_ckey_src = false;
         else
             s->has_ckey_dst = false;
+        resend_if_key_changed();
         com_ret(c, DD_OK);
         return;
     }
@@ -3467,6 +3482,7 @@ void Surface_SetColorKey(X86 *c) {
         s->ckey_src_lo = lo;
         s->ckey_src_hi = hi;
         s->has_ckey_src = true;
+        resend_if_key_changed();
     } else {
         s->ckey_dst_lo = lo;
         s->ckey_dst_hi = hi;
