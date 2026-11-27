@@ -52,6 +52,15 @@ struct Sample {
     uint32_t loops = 1, remaining = 0;
     uint32_t rate = 0; // AIL_set_sample_playback_rate; 0 plays at the file's rate
     bool playing = false;
+    // Double-buffered streaming (AIL_set_sample_type + AIL_load_sample_buffer):
+    // the game fills two halves alternately and the host plays them as one
+    // gapless stream. busy_until[n] is the played-byte count at which half n
+    // has been heard and can be refilled.
+    bool buffered = false, streaming = false;
+    uint32_t format = 3, flags = 0; // DIG_F_STEREO_16, unsigned 8-bit
+    uint32_t queued = 0, busy_until[2] = {0, 0};
+    int next = 0;
+    std::vector<uint8_t> convert;
 };
 std::vector<Sample> g_samples(64);
 
@@ -69,6 +78,9 @@ void sample_stop(Sample &s) {
         host_audio_stop(s.channel);
     s.playing = false;
     s.remaining = 0;
+    s.streaming = false;
+    s.queued = s.busy_until[0] = s.busy_until[1] = 0;
+    s.next = 0;
 }
 
 void sample_reset(Sample &s) {
@@ -105,6 +117,11 @@ void sample_play(Sample &s) {
 // The host loop flag is boolean. Finite repeats restart at completion on
 // the runtime's frame seam (also observed by status), with n total plays.
 void sample_update(Sample &s) {
+    if (s.buffered) {
+        if (s.streaming && !host_audio_voice_remaining_bytes(s.channel))
+            s.playing = false;
+        return;
+    }
     if (!s.playing || host_audio_is_playing(s.channel))
         return;
     if (s.remaining > 1) {
@@ -366,6 +383,80 @@ void ail_minimum_sample_buffer_size(X86 *c) {
     set_eax(c, (rate / 16 * frame + 255) & ~255u);
 }
 
+// DIG_F_* (bit 0 16-bit, bit 1 stereo) and DIG_PCM_SIGN (flag 1: signed 8-bit).
+void ail_set_sample_type(X86 *c) {
+    if (Sample *s = sample_for(arg(c, 0))) {
+        s->format = arg(c, 1) & 3;
+        s->flags = arg(c, 2);
+        s->buffered = true;
+    }
+    set_eax(c, 0);
+}
+
+// Which half the game may fill next: 0 or 1, or -1 while both are still queued.
+void ail_sample_buffer_ready(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    int32_t ready = -1;
+    if (s) {
+        const uint32_t played = s->streaming ? host_audio_played_bytes(s->channel) : 0;
+        for (int k = 0; k < 2 && ready < 0; ++k) {
+            int n = (s->next + k) & 1;
+            if (!s->streaming || s->busy_until[n] <= played)
+                ready = n;
+        }
+    }
+    set_eax(c, (uint32_t)ready);
+}
+
+// Hands one half to the host behind whatever is still playing. The first
+// buffer starts the stream; a zero-length buffer is the game saying it has no
+// more for that half.
+void ail_load_sample_buffer(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    uint32_t n = arg(c, 1) & 1, buf = arg(c, 2), len = arg(c, 3);
+    set_eax(c, 0);
+    if (!s || !len || !buf || !gm_fits(buf, len))
+        return;
+    const int channels = s->format & 2 ? 2 : 1, bits = s->format & 1 ? 16 : 8;
+    const void *pcm = gm_ptr(buf);
+    if (bits == 8 && (s->flags & 1)) { // signed 8-bit: the host plays unsigned
+        s->convert.assign((const uint8_t *)pcm, (const uint8_t *)pcm + len);
+        for (auto &b : s->convert)
+            b ^= 0x80;
+        pcm = s->convert.data();
+    }
+    len -= len % uint32_t(channels * bits / 8);
+    if (!len)
+        return;
+    if (s->channel < 0)
+        s->channel = dx_alloc_audio_channel();
+    if (s->channel < 0)
+        return;
+    if (!s->streaming || !host_audio_queue(s->channel, pcm, len)) {
+        HostAudioPlay p{};
+        p.channel = s->channel;
+        p.pcm = pcm;
+        p.bytes = len;
+        p.sample_rate = (int32_t)(s->rate ? s->rate : 22050);
+        p.channels = channels;
+        p.bits = bits;
+        p.volume = std::max(-10000, sample_volume(*s));
+        p.pan = miles_pan_mb(s->pan);
+        host_audio_play(&p);
+        const int32_t at = host_audio_stream(s->channel);
+        if (at < 0)
+            return;
+        s->streaming = true;
+        s->queued = uint32_t(at); // played_bytes counts on from here
+        s->busy_until[0] = s->busy_until[1] = 0;
+    }
+    s->queued += len;
+    s->busy_until[n] = s->queued;
+    s->next = int(n ^ 1);
+    s->buffered = true;
+    s->playing = true;
+}
+
 void ail_set_sample_loop_count(X86 *c) {
     if (Sample *s = sample_for(arg(c, 0)))
         s->loops = arg(c, 1);
@@ -584,6 +675,9 @@ const ImportShim g_mss32_shims[] = {
     AIL(set_sample_pan, 8, ail_set_sample_pan),
     AIL(set_sample_loop_count, 8, ail_set_sample_loop_count),
     AIL(set_sample_playback_rate, 8, ail_set_sample_playback_rate),
+    AIL(set_sample_type, 12, ail_set_sample_type),
+    AIL(load_sample_buffer, 16, ail_load_sample_buffer),
+    AIL(sample_buffer_ready, 4, ail_sample_buffer_ready),
     AIL(minimum_sample_buffer_size, 12, ail_minimum_sample_buffer_size),
     AIL(sample_loop_count, 4, ail_sample_loop_count),
     AIL(set_sample_reverb, 16, ret0),

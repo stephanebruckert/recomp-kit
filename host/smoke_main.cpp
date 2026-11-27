@@ -2010,6 +2010,8 @@ void report(FILE *out, bool abnormal) {
     }
     fprintf(out, "Direct3D:           %u draws, %u textures, %u write-backs\n",
             host_d3d_total_draws(), host_d3d_total_textures(), host_d3d_total_flushes());
+    fprintf(out, "legacy frames:      %llu detected (each stays legacy until the screen class changes)\n",
+            (unsigned long long)host_legacy_fallback_count());
     fprintf(out, "input:              %u changes announced, %u reads by the guest\n",
             host_input_notify_count(), host_input_read_count());
     fprintf(out, "audio:              %u plays, loudest sample %.3f\n", g_audio_plays,

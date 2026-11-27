@@ -6614,6 +6614,44 @@ static void test_dinput() {
 
 // Miles Sound System: every import has the arity its decorated name states,
 // so a call through it leaves ESP where the caller expects.
+// Miles double buffering: the game fills two halves alternately; the first
+// starts a gapless stream, each later one is appended, and a half is offered
+// again only once the host has played past it.
+static void test_mss32_double_buffer() {
+    cpu_reset();
+    g_plays.clear();
+    g_queue_enabled = true;
+    uint32_t smp = call_shim(tramp("mss32.dll", "_AIL_allocate_sample_handle@4"), {0});
+    CHECK(smp != 0);
+    call_shim(tramp("mss32.dll", "_AIL_init_sample@4"), {smp});
+    call_shim(tramp("mss32.dll", "_AIL_set_sample_type@12"), {smp, 3, 0}); // 16-bit stereo
+    call_shim(tramp("mss32.dll", "_AIL_set_sample_playback_rate@8"), {smp, 22050});
+    uint32_t ready = tramp("mss32.dll", "_AIL_sample_buffer_ready@4"),
+             load = tramp("mss32.dll", "_AIL_load_sample_buffer@16");
+    uint32_t buf = sc(0x800);
+    for (uint32_t i = 0; i < 1024; ++i)
+        wr8(buf + i, uint8_t(i));
+    CHECK_EQ(call_shim(ready, {smp}), 0u);
+    call_shim(load, {smp, 0, buf, 1024});
+    CHECK_EQ(g_plays.size(), 1u);
+    if (!g_plays.empty()) {
+        CHECK_EQ(g_plays[0].rate, 22050);
+        CHECK_EQ(g_plays[0].channels, 2);
+        CHECK_EQ(g_plays[0].bits, 16);
+        CHECK_EQ(g_plays[0].loop, 0);
+    }
+    CHECK_EQ(call_shim(ready, {smp}), 1u);
+    call_shim(load, {smp, 1, buf, 1024});
+    CHECK_EQ(g_plays.size(), 1u); // appended, not restarted
+    CHECK_EQ(g_queues.size(), 1u);
+    CHECK_EQ(call_shim(ready, {smp}), 0xffffffffu); // both halves still queued
+    g_stream_played = 1024;                          // the host has played half 0
+    CHECK_EQ(call_shim(ready, {smp}), 0u);
+    call_shim(tramp("mss32.dll", "_AIL_end_sample@4"), {smp});
+    call_shim(tramp("mss32.dll", "_AIL_release_sample_handle@4"), {smp});
+    g_queue_enabled = false;
+}
+
 static void test_mss32_arities() {
     cpu_reset();
     struct {
@@ -6631,6 +6669,9 @@ static void test_mss32_arities() {
         {"_AIL_init_sample@4", 1},
         {"_AIL_set_sample_playback_rate@8", 2},
         {"_AIL_minimum_sample_buffer_size@12", 3},
+        {"_AIL_set_sample_type@12", 3},
+        {"_AIL_load_sample_buffer@16", 4},
+        {"_AIL_sample_buffer_ready@4", 1},
         {"_AIL_set_sample_file@12", 3},
         {"_AIL_start_sample@4", 1},
         {"_AIL_end_sample@4", 1},
@@ -13327,6 +13368,7 @@ int main() {
         {"SetRenderTarget self", test_setrendertarget_same_surface},
         {"FindDevice, literal", test_find_device_literal},
         {"viewport record", test_viewport_record},
+        {"Miles double buffering", test_mss32_double_buffer},
         {"D3DVT_VERTEX lighting", test_d3d_vertex_lighting},
         {"Direct3D5 execute buffer", test_d3d5_execute_buffer},
         {"device description sizes", test_device_desc_sizes},
