@@ -2236,6 +2236,30 @@ static void fake_guest_fn(X86 *c) {
     set_eax(c, 0x600d);
 }
 
+// DirectPlayEnumerateA offers the TCP/IP service provider once, by GUID and
+// name, to the game's stdcall callback; DirectPlayCreate still refuses.
+static uint32_t g_dp_hits, g_dp_guid, g_dp_name, g_dp_ctx;
+static void fake_dp_callback(X86 *c) {
+    ++g_dp_hits;
+    g_dp_guid = arg(c, 0);
+    g_dp_name = arg(c, 1);
+    g_dp_ctx = arg(c, 4);
+    set_eax(c, 1); // continue
+}
+static void test_directplay_providers(X86 *c) {
+    g_dp_hits = 0;
+    uint32_t cb = imports_alloc_trampoline("test", "dp_enum_callback", fake_dp_callback, 5);
+    check(call_import(c, "DPLAYX.dll", "ord2", {cb, 0x1234}) == 0, "DirectPlayEnumerateA is DP_OK");
+    check(g_dp_hits == 1, "one service provider is offered");
+    check(g_dp_ctx == 0x1234, "with the caller's context");
+    check(g_dp_guid && rd32(g_dp_guid) == 0x36E95EE0u, "the TCP/IP provider's GUID");
+    check(g_dp_name && gm_str(g_dp_name).find("TCP/IP") != std::string::npos, "and its name");
+    uint32_t out = scratch_block(4);
+    wr32(out, 0xdeadbeef);
+    check(call_import(c, "DPLAYX.dll", "ord1", {0, out, 0}) == 0x8877010Eu && rd32(out) == 0,
+          "DirectPlayCreate is DPERR_UNAVAILABLE with a null object");
+}
+
 static std::vector<uint32_t> g_geometry_messages;
 static uint32_t g_geometry_width, g_geometry_height;
 static bool g_geometry_suppress;
@@ -7124,6 +7148,7 @@ int main(int argc, char **argv) {
     test_heap_shims(c);
     test_memory_shims_2(c);
     test_files(c);
+    test_directplay_providers(c);
     test_version_resource(c);
     test_pinned_clock(c);
     test_cadence_trace(c);

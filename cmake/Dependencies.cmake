@@ -58,7 +58,7 @@ endfunction()
 # Video is enabled on the hosts with shared-library packaging support.
 set(RECOMP_VIDEO_DEFAULT OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR IOS OR ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Linux"
-    OR (WIN32 AND NOT CMAKE_HOST_WIN32))
+    OR (WIN32 AND NOT CMAKE_HOST_WIN32) OR EMSCRIPTEN)
   set(RECOMP_VIDEO_DEFAULT ON)
 elseif(WIN32)
   # FFmpeg's configure needs an MSYS2 shell and GNU make. The shell is looked
@@ -87,7 +87,8 @@ if(WIN32 AND CMAKE_HOST_WIN32 AND NOT RECOMP_VIDEO_DEFAULT)
 endif()
 
 if(RECOMP_VIDEO)
-  if(NOT APPLE AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT WIN32)
+  if(NOT APPLE AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT WIN32
+      AND NOT EMSCRIPTEN)
     message(FATAL_ERROR "RECOMP_VIDEO is not supported on ${CMAKE_SYSTEM_NAME}")
   endif()
   include(ExternalProject)
@@ -114,7 +115,21 @@ if(RECOMP_VIDEO)
     --disable-autodetect --disable-xlib --disable-libxcb --disable-sdl2
     --disable-iconv --disable-zlib --disable-bzlib --disable-lzma
     --disable-securetransport --disable-audiotoolbox --disable-videotoolbox)
-  if(IOS)
+  if(EMSCRIPTEN)
+    # WebAssembly: static libraries linked into the module, no assembly, and
+    # threads on to match the game's shared-memory build. Same decoders as
+    # every other platform, so films and music play in the browser too.
+    list(REMOVE_ITEM RECOMP_FFMPEG_CONFIGURE --enable-shared --disable-static --enable-pic)
+    get_filename_component(RECOMP_FFMPEG_EM_BIN "${CMAKE_C_COMPILER}" DIRECTORY)
+    list(APPEND RECOMP_FFMPEG_CONFIGURE
+      --enable-static --disable-shared
+      --enable-cross-compile --target-os=none --arch=x86_32
+      --cc=${CMAKE_C_COMPILER} --cxx=${CMAKE_CXX_COMPILER}
+      --ar=${CMAKE_AR} --ranlib=${CMAKE_RANLIB} --nm=${RECOMP_FFMPEG_EM_BIN}/emnm
+      --disable-asm --disable-inline-asm --disable-x86asm --disable-stripping
+      --disable-runtime-cpudetect
+      "--extra-cflags=-pthread -O2" "--extra-ldflags=-pthread")
+  elseif(IOS)
     # CMake accepts either an SDK name or an absolute sysroot; FFmpeg needs
     # the directory. This dependency targets arm64 devices, not the simulator.
     set(RECOMP_FFMPEG_SYSROOT "${CMAKE_OSX_SYSROOT}")
@@ -183,6 +198,14 @@ if(RECOMP_VIDEO)
       set(major 61)
     endif()
     set(libdir lib)
+    if(EMSCRIPTEN)
+      list(APPEND RECOMP_FFMPEG_LIBRARIES "${RECOMP_FFMPEG_PREFIX}/lib/lib${component}.a")
+      add_library(ffmpeg::${component} STATIC IMPORTED GLOBAL)
+      set_target_properties(ffmpeg::${component} PROPERTIES
+        IMPORTED_LOCATION "${RECOMP_FFMPEG_PREFIX}/lib/lib${component}.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${RECOMP_FFMPEG_PREFIX}/include")
+      continue()
+    endif()
     if(ANDROID)
       # FFmpeg's Android target installs unversioned names and SONAMEs.
       set(filename lib${component}.so)

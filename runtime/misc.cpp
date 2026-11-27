@@ -2,6 +2,7 @@
 // ole32, IMM32, WSOCK32 and the non-audio half of WINMM (the millisecond
 // clock, multimedia timers and mmio file access). MIDI and aux output are
 // logging-only here; real audio belongs to the audio task.
+#include "guest.h"
 #include "imports.h"
 #include "game_config.h"
 #include "layout.h"
@@ -1382,8 +1383,30 @@ void m_DirectPlayCreate(X86 *c) {
     set_eax(c, 0x8877010Eu); // DPERR_UNAVAILABLE
 }
 
+// DirectPlayEnumerateA(callback, context): the TCP/IP service provider every
+// Windows of the period had, so a game that counts providers at startup
+// (TOCA shows "NO LINK DEVICES" with none) goes on. Creating a session still
+// fails, with DPERR_UNAVAILABLE, in DirectPlayCreate above.
 void m_DirectPlayEnumerateA(X86 *c) {
-    set_eax(c, 0); // DP_OK, no service providers
+    static uint32_t guid = 0, name = 0;
+    if (!guid) {
+        // DPSPGUID_TCPIP {36E95EE0-8577-11CF-960C-0080C7534E82}
+        static const uint8_t tcpip[16] = {0xe0, 0x5e, 0xe9, 0x36, 0x77, 0x85, 0xcf, 0x11,
+                                          0x96, 0x0c, 0x00, 0x80, 0xc7, 0x53, 0x4e, 0x82};
+        static const char label[] = "Internet TCP/IP Connection For DirectPlay";
+        guid = heap_alloc(16 + sizeof label, true);
+        if (guid) {
+            memcpy(gm_ptr(guid), tcpip, 16);
+            name = guid + 16;
+            memcpy(gm_ptr(name), label, sizeof label);
+        }
+    }
+    const uint32_t cb = arg(c, 0), ctx = arg(c, 1);
+    if (cb && guid) {
+        const uint32_t args[5] = {guid, name, 5, 0, ctx}; // DirectX 5
+        guest_call(c, cb, args, 5);
+    }
+    set_eax(c, 0); // DP_OK
 }
 
 void m_joy_unplugged(X86 *c) {
