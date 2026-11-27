@@ -157,6 +157,12 @@ enum ComIface : uint16_t {
     IF_D3DSURFACE8,
     IF_D3DVERTEXBUFFER8,
     IF_D3DINDEXBUFFER8,
+    // Direct3D 5's version 1 interfaces: execute buffers and their companions.
+    IF_D3DDEVICE,
+    IF_D3DVIEWPORT,
+    IF_D3DMATERIAL,
+    IF_D3DTEXTURE,
+    IF_D3DEXECUTEBUFFER,
     IF_COUNT
 };
 
@@ -226,6 +232,7 @@ enum ComKind : uint16_t {
     K_D3D9QUERY,      // an occlusion or event query
     K_D3D9VS,
     K_D3D9PS,
+    K_EXECBUF,        // a Direct3D execute buffer: guest memory plus its D3DEXECUTEDATA
 };
 
 // A DirectInput joystick axis's DIPROP_RANGE, DIPROP_DEADZONE and
@@ -336,6 +343,7 @@ struct ComObj {
     uint32_t light_state[D3D_LIGHTSTATE_MAX] = {0};
     float transform[D3DTRANSFORMSTATE_MAX][16] = {{0}};
     bool transform_set[D3DTRANSFORMSTATE_MAX] = {false};
+    std::vector<float> d3d_matrices; // execute-buffer matrix handles, 16 floats per handle (1-based)
 
     // --- K_VIEWPORT
     uint32_t vp_x = 0, vp_y = 0, vp_w = 0, vp_h = 0;

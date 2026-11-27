@@ -8209,6 +8209,189 @@ static void test_find_device_literal() {
     CHECK_EQ(call_method(d3d, D3D_FindDevice, {search, result}), DDERR_NOTFOUND);
 }
 
+// Direct3D 5 execute buffers through the version 1 device a DX5 game reaches
+// by QueryInterface on its Device2. Literal IIDs and slot numbers, as above.
+static void test_d3d5_execute_buffer() {
+    cpu_reset();
+    g_draws.clear();
+    uint32_t target = make_render_target_for_test(640, 480, 16);
+    uint32_t dd = rec_dd(), iid = sc(0x40), out = sc(0x60);
+    const uint8_t iid_d3d2[16] = {0xC1, 0x1E, 0xAE, 0x6A, 0x2A, 0x66, 0xD0, 0x11,
+                                  0x88, 0x9D, 0x00, 0xAA, 0x00, 0xBB, 0xB7, 0x6A};
+    const uint8_t iid_d3d1[16] = {0x80, 0x00, 0xBA, 0x3B, 0x21, 0x24, 0xCF, 0x11,
+                                  0xA3, 0x1A, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56};
+    const uint8_t iid_dev1[16] = {0x00, 0x88, 0x10, 0x64, 0x7D, 0x95, 0xD0, 0x11,
+                                  0x89, 0xAB, 0x00, 0xA0, 0xC9, 0x05, 0x41, 0x29};
+    const uint8_t hal[16] = {0xe0, 0x3d, 0xe6, 0x84, 0xaa, 0x46, 0xcf, 0x11,
+                             0x81, 0x6f, 0,    0,    0xc0, 0x20, 0x15, 0x6e};
+    memcpy(gm_ptr(iid), iid_d3d2, 16);
+    CHECK_EQ(call_method(dd, 0, {iid, out}), S_OK);
+    uint32_t d3d2 = rd32(out);
+    memcpy(gm_ptr(iid), iid_d3d1, 16);
+    CHECK_EQ(call_method(dd, 0, {iid, out}), S_OK);
+    uint32_t d3d1 = rd32(out);
+    CHECK_EQ(com_iface_of(d3d1), IF_D3D);
+    memcpy(gm_ptr(iid), hal, 16);
+    CHECK_EQ(call_method(d3d2, 8, {iid, target, out}), D3D_OK_); // CreateDevice
+    uint32_t dev2 = rd32(out);
+    memcpy(gm_ptr(iid), iid_dev1, 16);
+    CHECK_EQ(call_method(dev2, 0, {iid, out}), S_OK);
+    uint32_t dev = rd32(out);
+    CHECK_EQ(com_iface_of(dev), IF_D3DDEVICE);
+    CHECK_EQ(call_method(dev, 21, {out}), D3D_OK_); // GetDirect3D: the version 1 factory
+    CHECK_EQ(com_iface_of(rd32(out)), IF_D3D);
+    call_method(rd32(out), 2, {});
+
+    // A version 1 viewport from the version 1 factory, added to the version 1 device.
+    CHECK_EQ(call_method(d3d1, 7, {out, 0}), D3D_OK_); // CreateViewport
+    uint32_t vp = rd32(out);
+    CHECK_EQ(com_iface_of(vp), IF_D3DVIEWPORT);
+    CHECK_EQ(call_method(dev, 9, {vp}), D3D_OK_); // AddViewport
+
+    // Matrix handles round-trip.
+    CHECK_EQ(call_method(dev, 15, {out}), D3D_OK_); // CreateMatrix
+    uint32_t mh = rd32(out), m = sc(0x200), back = sc(0x280);
+    CHECK(mh != 0);
+    for (uint32_t i = 0; i < 16; ++i)
+        wrf32(m + 4 * i, float(i));
+    CHECK_EQ(call_method(dev, 16, {mh, m}), D3D_OK_);
+    CHECK_EQ(call_method(dev, 17, {mh, back}), D3D_OK_);
+    CHECK(rdf32(back + 4 * 7) == 7.0f);
+
+    uint32_t desc = sc(0x300);
+    gm_zero(desc, 20);
+    wr32(desc, 20);
+    wr32(desc + 4, 1); // D3DDEB_BUFSIZE
+    wr32(desc + 12, 1024);
+    CHECK_EQ(call_method(dev, 6, {desc, out, 0}), D3D_OK_); // CreateExecuteBuffer
+    uint32_t eb = rd32(out);
+    CHECK_EQ(com_iface_of(eb), IF_D3DEXECUTEBUFFER);
+    CHECK_EQ(call_method(eb, 4, {desc}), D3D_OK_); // Lock
+    uint32_t buf = rd32(desc + 16);
+    CHECK(buf != 0 && rd32(desc + 12) == 1024u);
+
+    // Three screen-space vertices, then: two PROCESSVERTICES COPY groups of the
+    // same vertices into slots 0-2 and 3-5, a TRIANGLE op with one triangle
+    // per group and one that mixes them, and EXIT.
+    for (uint32_t i = 0; i < 3; ++i) {
+        wrf32(buf + i * 32, float(10 + i * 20));
+        wrf32(buf + i * 32 + 4, float(i == 1 ? 50 : 10));
+        wrf32(buf + i * 32 + 12, 1.0f);
+        wr32(buf + i * 32 + 16, 0xffffffff);
+    }
+    uint32_t ip = buf + 96;
+    auto ins = [&](uint8_t op, uint8_t size, uint16_t count) {
+        wr8(ip, op);
+        wr8(ip + 1, size);
+        wr16(ip + 2, count);
+        ip += 4;
+    };
+    ins(9, 16, 2); // PROCESSVERTICES x2
+    for (uint32_t dest : {0u, 3u}) {
+        wr32(ip, 2); // D3DPROCESSVERTICES_COPY
+        wr16(ip + 4, 0);
+        wr16(ip + 6, (uint16_t)dest);
+        wr32(ip + 8, 3);
+        wr32(ip + 12, 0);
+        ip += 16;
+    }
+    ins(3, 8, 3); // TRIANGLE x3
+    const uint16_t tris[3][3] = {{0, 1, 2}, {3, 4, 5}, {0, 4, 5}};
+    for (const auto &t : tris) {
+        wr16(ip, t[0]);
+        wr16(ip + 2, t[1]);
+        wr16(ip + 4, t[2]);
+        wr16(ip + 6, 0);
+        ip += 8;
+    }
+    ins(11, 0, 0); // EXIT
+    ins(3, 8, 1);  // never reached
+    wr16(ip, 0);
+    wr16(ip + 2, 1);
+    wr16(ip + 4, 2);
+    ip += 8;
+    CHECK_EQ(call_method(eb, 5, {}), D3D_OK_); // Unlock
+    uint32_t data = sc(0x340);
+    gm_zero(data, 48);
+    wr32(data, 48);
+    wr32(data + 8, 3);                // dwVertexCount
+    wr32(data + 12, 96);              // dwInstructionOffset
+    wr32(data + 16, ip - (buf + 96)); // dwInstructionLength
+    CHECK_EQ(call_method(eb, 6, {data}), D3D_OK_); // SetExecuteData
+
+    CHECK_EQ(call_method(dev, 19, {}), D3D_OK_);           // BeginScene
+    CHECK_EQ(call_method(dev, 8, {eb, vp, 1}), D3D_OK_);   // Execute
+    CHECK_EQ(call_method(dev, 20, {}), D3D_OK_);           // EndScene
+    // One draw per group; the mixed triangle and everything after EXIT are not drawn.
+    CHECK_EQ(g_draws.size(), 2u);
+    for (const DrawRecord &d : g_draws) {
+        CHECK_EQ(d.vertex_type, D3DVT_TLVERTEX);
+        CHECK_EQ(d.primitive_type, 4u); // D3DPT_TRIANGLELIST
+        CHECK_EQ(d.vertex_count, 3u);
+        CHECK(d.indices == std::vector<uint16_t>({0, 1, 2}));
+    }
+    call_method(eb, 2, {});
+    call_method(vp, 2, {});
+    call_method(dev, 2, {});
+    call_method(dev2, 2, {});
+    call_method(target, 2, {});
+    call_method(d3d1, 2, {});
+    call_method(d3d2, 2, {});
+}
+
+// D3DDEVICEDESC is 172/204/252 bytes for DX3-5/DX5/DX6 callers. GetCaps and
+// FindDevice must write no more than the caller's version knows.
+static void test_device_desc_sizes() {
+    cpu_reset();
+    uint32_t target = make_render_target_for_test(640, 480, 16);
+    uint32_t dd = rec_dd(), iid = sc(0x40), out = sc(0x60);
+    const uint8_t iid_d3d2[16] = {0xC1, 0x1E, 0xAE, 0x6A, 0x2A, 0x66, 0xD0, 0x11,
+                                  0x88, 0x9D, 0x00, 0xAA, 0x00, 0xBB, 0xB7, 0x6A};
+    const uint8_t hal[16] = {0xe0, 0x3d, 0xe6, 0x84, 0xaa, 0x46, 0xcf, 0x11,
+                             0x81, 0x6f, 0,    0,    0xc0, 0x20, 0x15, 0x6e};
+    memcpy(gm_ptr(iid), iid_d3d2, 16);
+    CHECK_EQ(call_method(dd, 0, {iid, out}), S_OK);
+    uint32_t d3d = rd32(out);
+    memcpy(gm_ptr(iid), hal, 16);
+    CHECK_EQ(call_method(d3d, 8, {iid, target, out}), D3D_OK_);
+    uint32_t dev = rd32(out);
+
+    uint32_t hw = sc(0x400), hel = sc(0x600);
+    gm_zero(hw, 0x100);
+    gm_zero(hel, 0x100);
+    wr32(hw, 204);
+    wr32(hw + 204, 0xA5A5A5A5u);
+    wr32(hel, 172);
+    wr32(hel + 172, 0x5A5A5A5Au);
+    CHECK_EQ(call_method(dev, 3, {hw, hel}), D3D_OK_); // GetCaps
+    CHECK_EQ(rd32(hw), 204u);
+    CHECK_EQ(rd32(hw + 204), 0xA5A5A5A5u);
+    CHECK_EQ(rd32(hel), 172u);
+    CHECK_EQ(rd32(hel + 172), 0x5A5A5A5Au);
+    CHECK(rd32(hw + 12) != 0); // dwDevCaps was filled
+
+    // A DX5 D3DFINDDEVICERESULT: GUID and two 204-byte descriptions.
+    uint32_t search = sc(0x800), result = sc(0xa00);
+    gm_zero(search, 92);
+    wr32(search, 92);
+    wr32(search + 4, 2); // D3DFDS_GUID
+    memcpy(gm_ptr(search + 0x10), hal, 16);
+    const uint32_t dx5 = 4 + 16 + 2 * 204;
+    gm_zero(result, dx5 + 4);
+    wr32(result, dx5);
+    wr32(result + dx5, 0xC3C3C3C3u);
+    CHECK_EQ(call_method(d3d, 7, {search, result}), D3D_OK_); // FindDevice
+    CHECK_EQ(rd32(result + 0x14), 204u);       // hardware description
+    CHECK_EQ(rd32(result + 0x14 + 204), 204u); // software description
+    CHECK_EQ(rd32(result + dx5), 0xC3C3C3C3u);
+    wr32(result, dx5 + 2); // a size naming no DirectX version
+    CHECK_EQ(call_method(d3d, 7, {search, result}), DDERR_INVALIDPARAMS);
+
+    call_method(dev, 2, {});
+    call_method(target, 2, {});
+    call_method(d3d, 2, {});
+}
+
 // The game's viewport record is 11 dwords and reaches SetViewport2 at +0x44.
 static void test_viewport_record() {
     cpu_reset();
@@ -13024,6 +13207,8 @@ int main() {
         {"SetRenderTarget self", test_setrendertarget_same_surface},
         {"FindDevice, literal", test_find_device_literal},
         {"viewport record", test_viewport_record},
+        {"Direct3D5 execute buffer", test_d3d5_execute_buffer},
+        {"device description sizes", test_device_desc_sizes},
         {"GetDeviceData stride", test_device_data_stride16},
         {"GetClipStatus canary", test_clipstatus_canary},
         {"overflow rejection", test_overflow_rejection},

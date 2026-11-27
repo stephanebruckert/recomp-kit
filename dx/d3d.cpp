@@ -79,6 +79,17 @@ static const uint8_t IID_IDirect3DTexture2_[16] =
 // 4417C142, not 4417C145: 4417C145 is IID_IDirect3DExecuteBuffer.
 static const uint8_t IID_IDirect3DLight_[16] =
     IID_BYTES(0x4417C142, 0x33AD, 0x11CF, 0x81, 0x6F, 0x00, 0x00, 0xC0, 0x20, 0x15, 0x6E);
+// Direct3D 5's version 1 interfaces, reached through QueryInterface.
+static const uint8_t IID_IDirect3DDevice_[16] =
+    IID_BYTES(0x64108800, 0x957D, 0x11D0, 0x89, 0xAB, 0x00, 0xA0, 0xC9, 0x05, 0x41, 0x29);
+static const uint8_t IID_IDirect3DViewport_[16] =
+    IID_BYTES(0x4417C146, 0x33AD, 0x11CF, 0x81, 0x6F, 0x00, 0x00, 0xC0, 0x20, 0x15, 0x6E);
+static const uint8_t IID_IDirect3DMaterial_[16] =
+    IID_BYTES(0x4417C144, 0x33AD, 0x11CF, 0x81, 0x6F, 0x00, 0x00, 0xC0, 0x20, 0x15, 0x6E);
+static const uint8_t IID_IDirect3DExecuteBuffer_[16] =
+    IID_BYTES(0x4417C145, 0x33AD, 0x11CF, 0x81, 0x6F, 0x00, 0x00, 0xC0, 0x20, 0x15, 0x6E);
+static const uint8_t IID_IDirect3DTexture_[16] =
+    IID_BYTES(0x2CDCD9E0, 0x25A0, 0x11CF, 0xA3, 0x1A, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56);
 // The device GUIDs FindDevice and CreateDevice accept.
 static const uint8_t IID_IDirect3DHALDevice_[16] =
     IID_BYTES(0x84E63DE0, 0x46AA, 0x11CF, 0x81, 0x6F, 0x00, 0x00, 0xC0, 0x20, 0x15, 0x6E);
@@ -145,8 +156,13 @@ bool version3(X86 *c) {
     ComIface f = com_iface_of(arg(c, 0));
     return f == IF_D3D3 || f == IF_D3DDEVICE3;
 }
+// Called through IDirect3D or IDirect3DDevice (version 1, execute buffers).
+bool version1(X86 *c) {
+    ComIface f = com_iface_of(arg(c, 0));
+    return f == IF_D3D || f == IF_D3DDEVICE;
+}
 ComIface viewport_iface(X86 *c) {
-    return version3(c) ? IF_D3DVIEWPORT3 : IF_D3DVIEWPORT2;
+    return version3(c) ? IF_D3DVIEWPORT3 : version1(c) ? IF_D3DVIEWPORT : IF_D3DVIEWPORT2;
 }
 uint32_t vertex_type(X86 *c, uint32_t type) {
     if (!version3(c))
@@ -251,7 +267,7 @@ void write_primcaps(uint32_t a) {
 
 // `hardware` distinguishes the HAL description from the HEL (software) one;
 // the game's device search asks for hardware.
-void write_device_desc(uint32_t a, bool hardware) {
+void write_device_desc_full(uint32_t a, bool hardware) {
     if (!a || !gm_valid(a, D3DDEVICEDESC_SIZE))
         return;
     gm_zero(a, D3DDEVICEDESC_SIZE);
@@ -292,6 +308,33 @@ void write_device_desc(uint32_t a, bool hardware) {
     wr32(a + D3DDD_OFF_dwTextureOpCaps, 0);
     wr16(a + D3DDD_OFF_wMaxTextureBlendStages, 1);
     wr16(a + D3DDD_OFF_wMaxSimultaneousTextures, 1);
+}
+
+// D3DDEVICEDESC grew with each DirectX: 172 bytes for IDirect3D (DX3/5 v1),
+// 204 for IDirect3D2 (DX5) and 252 for IDirect3D3 (DX6). Direct3D writes the
+// size the caller's version knows, and games copy the description by the
+// dwSize it reports: writing 252 into a DX5 game's 204-byte struct overruns
+// its stack frame.
+const uint32_t D3DDEVICEDESC_V1_SIZE = 172, D3DDEVICEDESC_V2_SIZE = 204;
+bool device_desc_size_known(uint32_t size) {
+    return size == D3DDEVICEDESC_V1_SIZE || size == D3DDEVICEDESC_V2_SIZE ||
+           size == D3DDEVICEDESC_SIZE;
+}
+void write_device_desc(uint32_t a, bool hardware, uint32_t size = D3DDEVICEDESC_SIZE) {
+    if (size >= D3DDEVICEDESC_SIZE) {
+        write_device_desc_full(a, hardware);
+        return;
+    }
+    if (!a || !gm_valid(a, size))
+        return;
+    static uint32_t full = 0;
+    if (!full)
+        full = heap_alloc(D3DDEVICEDESC_SIZE, true, 16);
+    if (!full)
+        return;
+    write_device_desc_full(full, hardware);
+    memcpy(gm_ptr(a), gm_ptr(full), size);
+    wr32(a + D3DDD_OFF_dwSize, size);
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,10 +1330,15 @@ void Device_GetCaps(X86 *c) {
         com_ret(c, DDERR_INVALIDPARAMS);
         return;
     }
+    // Each description is written at the size the caller declared in it.
+    auto size_of = [&](uint32_t a) {
+        uint32_t n = gm_valid(a, 4) ? rd32(a) : 0;
+        return device_desc_size_known(n) ? n : (version3(c) ? D3DDEVICEDESC_SIZE : D3DDEVICEDESC_V2_SIZE);
+    };
     if (hw)
-        write_device_desc(hw, true);
+        write_device_desc(hw, true, size_of(hw));
     if (hel)
-        write_device_desc(hel, false);
+        write_device_desc(hel, false, size_of(hel));
     com_ret(c, D3D_OK_);
 }
 
@@ -1531,7 +1579,7 @@ void Device_GetDirect3D(X86 *c) {
         return;
     }
     com_addref(d3d);
-    com_out_ptr(out, com_view(d3d, version3(c) ? IF_D3D3 : IF_D3D2));
+    com_out_ptr(out, com_view(d3d, version3(c) ? IF_D3D3 : version1(c) ? IF_D3D : IF_D3D2));
     com_ret(c, D3D_OK_);
 }
 
@@ -1956,6 +2004,545 @@ const ComMethod g_device2[] = {
 };
 
 // ===========================================================================
+// IDirect3DDevice (version 1): execute buffers
+// ===========================================================================
+// Direct3D 5 games still reach the version 1 device through QueryInterface on
+// their Device2 to submit execute buffers. It is the same device object; only
+// CreateExecuteBuffer, Execute and the matrix handles are new.
+//
+// An execute buffer is a little program: PROCESSVERTICES transforms (and
+// lights) a run of the buffer's vertices into numbered slots, and TRIANGLE and
+// LINE instructions draw by slot. Rather than transform on the CPU, each
+// PROCESSVERTICES is remembered as a group: its vertex type, where its source
+// vertices sit in the buffer, and the transforms and light state in force at
+// that moment. A run of triangles whose three slots all come from one group is
+// then an ordinary indexed DrawPrimitive of that group's vertices under its
+// state, which the host already transforms, lights and clips.
+
+const uint32_t D3DEXECUTEDATA_SIZE = 48;
+const uint32_t EB_VERTEX_SIZE = 32; // D3DVERTEX, D3DLVERTEX and D3DTLVERTEX alike
+
+ComObj *this_execbuf(X86 *c) {
+    ComObj *o = com_this_arg(c);
+    return (o && o->kind == K_EXECBUF) ? o : nullptr;
+}
+
+DX_STUB(Device1_Pick, DDERR_UNSUPPORTED)
+DX_STUB(Device1_GetPickRecords, DDERR_UNSUPPORTED)
+
+void Device1_Initialize(X86 *c) {
+    com_ret(c, this_device(c) ? D3D_OK_ : DDERR_INVALIDOBJECT);
+}
+
+// CreateExecuteBuffer(this, D3DEXECUTEBUFFERDESC *, IDirect3DExecuteBuffer **, IUnknown *)
+void Device1_CreateExecuteBuffer(X86 *c) {
+    ComObj *dev = this_device(c);
+    uint32_t desc = arg(c, 1), out = arg(c, 2);
+    if (!dev || !desc || !out || !gm_valid(desc, 20)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    com_out_ptr(out, 0);
+    uint32_t flags = rd32(desc + 4), size = rd32(desc + 12), data = rd32(desc + 16);
+    if (!(flags & 1) || !size) { // D3DDEB_BUFSIZE
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    ComObj *eb = com_new(K_EXECBUF);
+    if ((flags & 4) && data && gm_valid(data, size)) { // D3DDEB_LPDATA: the guest's memory
+        eb->buf_pixels = data;
+        eb->owns_pixels = false;
+    } else {
+        eb->buf_pixels = heap_alloc(size, true, 16);
+        eb->owns_pixels = true;
+    }
+    eb->buf_bytes = size;
+    eb->vp_device = dev->id;
+    eb->blob.assign(D3DEXECUTEDATA_SIZE, 0);
+    eb->blob[0] = D3DEXECUTEDATA_SIZE;
+    uint32_t view = eb->buf_pixels ? com_view(eb, IF_D3DEXECUTEBUFFER) : 0;
+    if (!view) {
+        com_release(eb);
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    com_out_ptr(out, view);
+    com_ret(c, D3D_OK_);
+}
+
+void ExecBuf_Initialize(X86 *c) {
+    com_ret(c, this_execbuf(c) ? D3D_OK_ : DDERR_INVALIDOBJECT);
+}
+
+// Lock(this, D3DEXECUTEBUFFERDESC *): hands out the buffer's memory.
+void ExecBuf_Lock(X86 *c) {
+    ComObj *eb = this_execbuf(c);
+    uint32_t desc = arg(c, 1);
+    if (!eb || !desc || !gm_valid(desc, 20)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    wr32(desc + 4, rd32(desc + 4) | 1 | 4); // D3DDEB_BUFSIZE | D3DDEB_LPDATA
+    wr32(desc + 12, eb->buf_bytes);
+    wr32(desc + 16, eb->buf_pixels);
+    ++eb->lock_count;
+    com_ret(c, D3D_OK_);
+}
+
+void ExecBuf_Unlock(X86 *c) {
+    ComObj *eb = this_execbuf(c);
+    if (!eb) {
+        com_ret(c, DDERR_INVALIDOBJECT);
+        return;
+    }
+    if (eb->lock_count > 0)
+        --eb->lock_count;
+    com_ret(c, D3D_OK_);
+}
+
+void ExecBuf_SetExecuteData(X86 *c) {
+    ComObj *eb = this_execbuf(c);
+    uint32_t data = arg(c, 1);
+    if (!eb || !data || !gm_valid(data, 4)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    uint32_t n = std::min(rd32(data), D3DEXECUTEDATA_SIZE);
+    if (!gm_valid(data, n)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    memcpy(eb->blob.data(), gm_ptr(data), n);
+    com_ret(c, D3D_OK_);
+}
+
+void ExecBuf_GetExecuteData(X86 *c) {
+    ComObj *eb = this_execbuf(c);
+    uint32_t data = arg(c, 1);
+    if (!eb || !data || !gm_valid(data, 4)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    uint32_t n = std::min(rd32(data), D3DEXECUTEDATA_SIZE);
+    if (!gm_valid(data, n)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    memcpy(gm_ptr(data), eb->blob.data(), n);
+    com_ret(c, D3D_OK_);
+}
+
+DX_STUB(ExecBuf_Validate, DDERR_UNSUPPORTED)
+
+void ExecBuf_Optimize(X86 *c) {
+    com_ret(c, this_execbuf(c) ? D3D_OK_ : DDERR_INVALIDOBJECT);
+}
+
+void execbuf_destroy(ComObj *eb) {
+    if (eb->owns_pixels && eb->buf_pixels)
+        heap_free(eb->buf_pixels);
+    eb->buf_pixels = 0;
+}
+
+const ComMethod g_execbuf[] = {
+    {"QueryInterface", 3, com_QueryInterface},
+    {"AddRef", 1, com_AddRef},
+    {"Release", 1, com_Release},
+    {"Initialize", 3, ExecBuf_Initialize},
+    {"Lock", 2, ExecBuf_Lock},
+    {"Unlock", 1, ExecBuf_Unlock},
+    {"SetExecuteData", 2, ExecBuf_SetExecuteData},
+    {"GetExecuteData", 2, ExecBuf_GetExecuteData},
+    {"Validate", 5, ExecBuf_Validate},
+    {"Optimize", 2, ExecBuf_Optimize},
+};
+
+// --- Matrix handles. Handle h is d3d_matrices[(h - 1) * 16 ..], never 0.
+float *device_matrix(ComObj *dev, uint32_t h) {
+    if (!h || h > dev->d3d_matrices.size() / 16)
+        return nullptr;
+    return &dev->d3d_matrices[(h - 1) * 16];
+}
+
+void Device1_CreateMatrix(X86 *c) {
+    ComObj *dev = this_device(c);
+    uint32_t out = arg(c, 1);
+    if (!dev || !out || !gm_valid(out, 4)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    dev->d3d_matrices.resize(dev->d3d_matrices.size() + 16, 0.0f);
+    wr32(out, (uint32_t)(dev->d3d_matrices.size() / 16));
+    com_ret(c, D3D_OK_);
+}
+
+void Device1_SetMatrix(X86 *c) {
+    ComObj *dev = this_device(c);
+    float *m = dev ? device_matrix(dev, arg(c, 1)) : nullptr;
+    uint32_t src = arg(c, 2);
+    if (!m || !src || !gm_valid(src, 64)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    for (int i = 0; i < 16; ++i)
+        m[i] = rdf32(src + 4u * (uint32_t)i);
+    com_ret(c, D3D_OK_);
+}
+
+void Device1_GetMatrix(X86 *c) {
+    ComObj *dev = this_device(c);
+    const float *m = dev ? device_matrix(dev, arg(c, 1)) : nullptr;
+    uint32_t dst = arg(c, 2);
+    if (!m || !dst || !gm_valid(dst, 64)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    for (int i = 0; i < 16; ++i)
+        wrf32(dst + 4u * (uint32_t)i, m[i]);
+    com_ret(c, D3D_OK_);
+}
+
+// Handles stay allocated so later ones keep their numbers; the slot is zeroed.
+void Device1_DeleteMatrix(X86 *c) {
+    ComObj *dev = this_device(c);
+    float *m = dev ? device_matrix(dev, arg(c, 1)) : nullptr;
+    if (!m) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    memset(m, 0, 16 * sizeof(float));
+    com_ret(c, D3D_OK_);
+}
+
+// One PROCESSVERTICES: what the host needs to draw its slots later.
+struct EbGroup {
+    uint32_t vtype = 0;     // D3DVT_VERTEX, D3DVT_LVERTEX or D3DVT_TLVERTEX
+    uint32_t vertices = 0;  // guest address of the group's first source vertex
+    uint32_t dest = 0;      // first slot
+    uint32_t count = 0;
+    float transform[D3DTRANSFORMSTATE_MAX][16];
+    bool transform_set[D3DTRANSFORMSTATE_MAX];
+    uint32_t light_state[D3D_LIGHTSTATE_MAX];
+};
+
+// Per-Execute bookkeeping, reused between calls to avoid reallocating.
+std::vector<EbGroup> &eb_groups() {
+    static auto *v = new std::vector<EbGroup>();
+    return *v;
+}
+std::vector<int32_t> &eb_slots() { // slot -> index into eb_groups, -1 when unset
+    static auto *v = new std::vector<int32_t>();
+    return *v;
+}
+uint32_t g_eb_indices = 0, g_eb_index_capacity = 0; // guest scratch for one batch
+
+// Draws `n` indices (relative to the group's first vertex) under that group's
+// transforms and light state; the device's own are restored afterwards.
+void eb_draw(X86 *c, ComObj *dev, const EbGroup &g, uint32_t prim,
+             const std::vector<uint16_t> &idx) {
+    if (idx.empty())
+        return;
+    uint32_t bytes = (uint32_t)idx.size() * 2u;
+    if (g_eb_index_capacity < bytes) {
+        if (g_eb_indices)
+            heap_free(g_eb_indices);
+        g_eb_index_capacity = bytes < 4096 ? 4096 : bytes * 2;
+        g_eb_indices = heap_alloc(g_eb_index_capacity, true, 16);
+        if (!g_eb_indices) {
+            g_eb_index_capacity = 0;
+            return;
+        }
+    }
+    memcpy(gm_ptr(g_eb_indices), idx.data(), bytes);
+    static float saved_transform[D3DTRANSFORMSTATE_MAX][16];
+    static bool saved_set[D3DTRANSFORMSTATE_MAX];
+    static uint32_t saved_light[D3D_LIGHTSTATE_MAX];
+    memcpy(saved_transform, dev->transform, sizeof saved_transform);
+    memcpy(saved_set, dev->transform_set, sizeof saved_set);
+    memcpy(saved_light, dev->light_state, sizeof saved_light);
+    memcpy(dev->transform, g.transform, sizeof g.transform);
+    memcpy(dev->transform_set, g.transform_set, sizeof g.transform_set);
+    memcpy(dev->light_state, g.light_state, sizeof g.light_state);
+    submit(c, dev, prim, g.vtype, g.vertices, g.count, g_eb_indices, (uint32_t)idx.size());
+    memcpy(dev->transform, saved_transform, sizeof saved_transform);
+    memcpy(dev->transform_set, saved_set, sizeof saved_set);
+    memcpy(dev->light_state, saved_light, sizeof saved_light);
+}
+
+// TRIANGLE (3 slots per record) or LINE (2): consecutive primitives from one
+// group become one indexed draw. A primitive mixing groups cannot be drawn
+// under one transform; it is counted and dropped.
+void eb_primitives(X86 *c, ComObj *dev, uint32_t p, uint32_t size, uint32_t count, int per,
+                   uint32_t prim) {
+    const std::vector<int32_t> &slots = eb_slots();
+    const std::vector<EbGroup> &groups = eb_groups();
+    std::vector<uint16_t> idx;
+    int32_t cur = -1;
+    static uint32_t mixed = 0;
+    for (uint32_t k = 0; k < count; ++k) {
+        uint32_t rec = p + k * size;
+        uint16_t v[3] = {rd16(rec), rd16(rec + 2), per == 3 ? rd16(rec + 4) : (uint16_t)0};
+        int32_t g = -1;
+        bool ok = true;
+        for (int i = 0; i < per && ok; ++i) {
+            int32_t s = v[i] < slots.size() ? slots[v[i]] : -1;
+            if (s < 0 || (g >= 0 && s != g))
+                ok = false;
+            g = s;
+        }
+        if (!ok) {
+            if (mixed++ < 4)
+                LOGW("d3d: execute-buffer primitive uses slots %u %u %u from different or "
+                     "unprocessed vertex groups; dropped",
+                     v[0], v[1], v[2]);
+            continue;
+        }
+        if (g != cur) {
+            if (cur >= 0)
+                eb_draw(c, dev, groups[cur], prim, idx);
+            idx.clear();
+            cur = g;
+        }
+        for (int i = 0; i < per; ++i)
+            idx.push_back((uint16_t)(v[i] - groups[g].dest));
+    }
+    if (cur >= 0)
+        eb_draw(c, dev, groups[cur], prim, idx);
+}
+
+// Execute(this, IDirect3DExecuteBuffer *, IDirect3DViewport *, flags)
+void Device1_Execute(X86 *c) {
+    ComObj *dev = this_device(c);
+    ComObj *eb = arg(c, 1) ? com_this(arg(c, 1)) : nullptr;
+    ComObj *vp = arg(c, 2) ? com_this(arg(c, 2)) : nullptr;
+    if (vp && vp->kind != K_VIEWPORT)
+        vp = nullptr;
+    if (!dev || !eb || eb->kind != K_EXECBUF || !eb->buf_pixels) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    if (vp)
+        dev->current_viewport = vp->id;
+    const uint8_t *ed = eb->blob.data();
+    auto field = [&](int i) {
+        uint32_t v;
+        memcpy(&v, ed + 4 * i, 4);
+        return v;
+    };
+    const uint32_t base = eb->buf_pixels, size = eb->buf_bytes;
+    const uint32_t voff = field(1), ioff = field(3), ilen = field(4);
+    if (ioff > size || ilen > size - ioff || voff > size) {
+        log_once("d3d.eb.range", "d3d: execute data lies outside its %u-byte buffer", size);
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    std::vector<EbGroup> &groups = eb_groups();
+    std::vector<int32_t> &slots = eb_slots();
+    groups.clear();
+    std::fill(slots.begin(), slots.end(), -1);
+
+    uint32_t ip = base + ioff;
+    const uint32_t end = ip + ilen, vb = base + voff;
+    while (ip + 4 <= end) {
+        const uint8_t op = rd8(ip), bsize = rd8(ip + 1);
+        const uint16_t count = rd16(ip + 2);
+        const uint32_t p = ip + 4;
+        uint32_t next = p + (uint32_t)bsize * count;
+        if (next > end) {
+            log_once("d3d.eb.trunc", "d3d: execute-buffer instruction %u runs past the buffer", op);
+            break;
+        }
+        switch (op) {
+        case 1:  // D3DOP_POINT
+        case 13: // D3DOP_SPAN
+            log_once("d3d.eb.point", "d3d: execute-buffer points/spans are not drawn");
+            break;
+        case 2: // D3DOP_LINE
+            eb_primitives(c, dev, p, bsize, count, 2, 2 /* D3DPT_LINELIST */);
+            break;
+        case 3: // D3DOP_TRIANGLE
+            eb_primitives(c, dev, p, bsize, count, 3, 4 /* D3DPT_TRIANGLELIST */);
+            break;
+        case 4: // D3DOP_MATRIXLOAD: dest = src
+            for (uint32_t k = 0; k < count; ++k) {
+                float *d = device_matrix(dev, rd32(p + k * bsize));
+                const float *s = device_matrix(dev, rd32(p + k * bsize + 4));
+                if (d && s)
+                    memmove(d, s, 16 * sizeof(float));
+            }
+            break;
+        case 5: // D3DOP_MATRIXMULTIPLY: dest = src1 * src2, row-major
+            for (uint32_t k = 0; k < count; ++k) {
+                float *d = device_matrix(dev, rd32(p + k * bsize));
+                const float *a = device_matrix(dev, rd32(p + k * bsize + 4));
+                const float *b = device_matrix(dev, rd32(p + k * bsize + 8));
+                if (!d || !a || !b)
+                    continue;
+                float out[16];
+                for (int r = 0; r < 4; ++r)
+                    for (int col = 0; col < 4; ++col) {
+                        float s = 0.0f;
+                        for (int i = 0; i < 4; ++i)
+                            s += a[r * 4 + i] * b[i * 4 + col];
+                        out[r * 4 + col] = s;
+                    }
+                memcpy(d, out, sizeof out);
+            }
+            break;
+        case 6: // D3DOP_STATETRANSFORM: transform type <- matrix handle
+            for (uint32_t k = 0; k < count; ++k) {
+                uint32_t type = rd32(p + k * bsize);
+                const float *m = device_matrix(dev, rd32(p + k * bsize + 4));
+                if (!m || type == 0 || type >= D3DTRANSFORMSTATE_MAX)
+                    continue;
+                memcpy(dev->transform[type], m, 16 * sizeof(float));
+                dev->transform_set[type] = true;
+            }
+            break;
+        case 7: // D3DOP_STATELIGHT
+            for (uint32_t k = 0; k < count; ++k) {
+                uint32_t type = rd32(p + k * bsize);
+                if (type < D3D_LIGHTSTATE_MAX)
+                    dev->light_state[type] = rd32(p + k * bsize + 4);
+            }
+            break;
+        case 8: // D3DOP_STATERENDER
+            for (uint32_t k = 0; k < count; ++k) {
+                uint32_t type = rd32(p + k * bsize);
+                if (type < D3D_RENDERSTATE_MAX)
+                    dev->render_state[type] = rd32(p + k * bsize + 4);
+            }
+            break;
+        case 9: // D3DOP_PROCESSVERTICES
+            for (uint32_t k = 0; k < count; ++k) {
+                const uint32_t rec = p + k * bsize;
+                const uint32_t flags = rd32(rec), start = rd16(rec + 4), dest = rd16(rec + 6);
+                uint32_t n = rd32(rec + 8);
+                if (dest + n > 65536)
+                    n = 65536 - dest;
+                const uint32_t src = vb + start * EB_VERTEX_SIZE;
+                if (!n || !gm_fits_n(src, n, EB_VERTEX_SIZE) || src + n * EB_VERTEX_SIZE > base + size) {
+                    log_once("d3d.eb.pv", "d3d: PROCESSVERTICES source lies outside its buffer");
+                    continue;
+                }
+                EbGroup g;
+                switch (flags & 7) {
+                case 0:
+                    g.vtype = D3DVT_VERTEX;
+                    break; // D3DPROCESSVERTICES_TRANSFORMLIGHT
+                case 1:
+                    g.vtype = D3DVT_LVERTEX;
+                    break; // D3DPROCESSVERTICES_TRANSFORM
+                default:
+                    g.vtype = D3DVT_TLVERTEX;
+                    break; // D3DPROCESSVERTICES_COPY
+                }
+                g.vertices = src;
+                g.dest = dest;
+                g.count = n;
+                memcpy(g.transform, dev->transform, sizeof g.transform);
+                memcpy(g.transform_set, dev->transform_set, sizeof g.transform_set);
+                memcpy(g.light_state, dev->light_state, sizeof g.light_state);
+                groups.push_back(g);
+                if (slots.size() < dest + n)
+                    slots.resize(dest + n, -1);
+                std::fill(slots.begin() + dest, slots.begin() + dest + n,
+                          (int32_t)groups.size() - 1);
+            }
+            break;
+        case 10: // D3DOP_TEXTURELOAD: dest texture handle <- source texture handle
+            for (uint32_t k = 0; k < count; ++k) {
+                ComObj *dst = object_for_handle(rd32(p + k * bsize));
+                ComObj *srcobj = object_for_handle(rd32(p + k * bsize + 4));
+                if (!dst || !srcobj || dst->kind != K_SURFACE || srcobj->kind != K_SURFACE)
+                    continue;
+                X86 t = *c;
+                t.r[R_ESP] = c->r[R_ESP] - 64;
+                wr32(t.r[R_ESP] + 4, com_view(dst, IF_D3DTEXTURE2));
+                wr32(t.r[R_ESP] + 8, com_view(srcobj, IF_D3DTEXTURE2));
+                Texture_Load(&t);
+            }
+            break;
+        case 11: // D3DOP_EXIT
+            next = end;
+            break;
+        case 12: { // D3DOP_BRANCHFORWARD {mask, value, negate, offset}
+            const uint32_t mask = rd32(p), value = rd32(p + 4), negate = rd32(p + 8),
+                           offset = rd32(p + 12);
+            const bool taken = ((field(7) & mask) == value) != (negate != 0);
+            if (taken)
+                next = offset ? ip + offset : end;
+            break;
+        }
+        case 14: // D3DOP_SETSTATUS: the D3DSTATUS in the execute data
+            if (bsize >= 24)
+                memcpy(eb->blob.data() + 24, gm_ptr(p), 24);
+            break;
+        default:
+            log_once("d3d.eb.op", "d3d: execute-buffer opcode %u is unknown; execution stops", op);
+            next = end;
+            break;
+        }
+        ip = next;
+    }
+    com_ret(c, D3D_OK_);
+}
+
+const ComMethod g_device1[] = {
+    {"QueryInterface", 3, com_QueryInterface},
+    {"AddRef", 1, com_AddRef},
+    {"Release", 1, com_Release},
+    {"Initialize", 4, Device1_Initialize},
+    {"GetCaps", 3, Device_GetCaps},
+    {"SwapTextureHandles", 3, Device_SwapTextureHandles},
+    {"CreateExecuteBuffer", 4, Device1_CreateExecuteBuffer},
+    {"GetStats", 2, Device_GetStats},
+    {"Execute", 4, Device1_Execute},
+    {"AddViewport", 2, Device_AddViewport},
+    {"DeleteViewport", 2, Device_DeleteViewport},
+    {"NextViewport", 4, Device_NextViewport},
+    {"Pick", 5, Device1_Pick},
+    {"GetPickRecords", 3, Device1_GetPickRecords},
+    {"EnumTextureFormats", 3, Device_EnumTextureFormats},
+    {"CreateMatrix", 2, Device1_CreateMatrix},
+    {"SetMatrix", 3, Device1_SetMatrix},
+    {"GetMatrix", 3, Device1_GetMatrix},
+    {"DeleteMatrix", 2, Device1_DeleteMatrix},
+    {"BeginScene", 1, Device_BeginScene},
+    {"EndScene", 1, Device_EndScene},
+    {"GetDirect3D", 2, Device_GetDirect3D},
+};
+
+// IDirect3DMaterial and IDirect3DTexture: the version 2 methods with
+// Initialize (and Reserve/Unreserve, Unload) in their original slots.
+void Iface1_Initialize(X86 *c) {
+    com_ret(c, com_this_arg(c) ? D3D_OK_ : DDERR_INVALIDOBJECT);
+}
+
+const ComMethod g_material1[] = {
+    {"QueryInterface", 3, com_QueryInterface},
+    {"AddRef", 1, com_AddRef},
+    {"Release", 1, com_Release},
+    {"Initialize", 2, Iface1_Initialize},
+    {"SetMaterial", 2, Material_SetMaterial},
+    {"GetMaterial", 2, Material_GetMaterial},
+    {"GetHandle", 3, Material_GetHandle},
+    {"Reserve", 1, Iface1_Initialize},
+    {"Unreserve", 1, Iface1_Initialize},
+};
+
+const ComMethod g_texture1[] = {
+    {"QueryInterface", 3, com_QueryInterface},
+    {"AddRef", 1, com_AddRef},
+    {"Release", 1, com_Release},
+    {"Initialize", 3, Iface1_Initialize},
+    {"GetHandle", 3, Texture_GetHandle},
+    {"PaletteChanged", 3, Texture_PaletteChanged},
+    {"Load", 2, Texture_Load},
+    {"Unload", 1, Iface1_Initialize},
+};
+
+// ===========================================================================
 // IDirect3D / IDirect3D2
 // ===========================================================================
 // The device GUIDs this Direct3D offers, in enumeration order. The HAL device
@@ -1994,11 +2581,14 @@ void D3D_EnumDevices(X86 *c) {
         uint32_t name = base + 16 + 64;
         uint32_t hw = base + 16 + 128;
         uint32_t sw = hw + D3DDEVICEDESC_SIZE;
+        const uint32_t size = version3(c)   ? D3DDEVICEDESC_SIZE
+                              : version1(c) ? D3DDEVICEDESC_V1_SIZE
+                                            : D3DDEVICEDESC_V2_SIZE;
         memcpy(gm_ptr(guid), e.guid, 16);
         gm_put_str(desc, e.desc, 64);
         gm_put_str(name, e.name, 64);
-        write_device_desc(hw, e.hardware);
-        write_device_desc(sw, false);
+        write_device_desc(hw, e.hardware, size);
+        write_device_desc(sw, false, size);
         uint32_t cbargs[6] = {guid, desc, name, hw, sw, ctx};
         if (guest_call(c, cb, cbargs, 6) != DDENUMRET_OK)
             break;
@@ -2032,7 +2622,8 @@ void D3D_CreateMaterial(X86 *c) {
         return;
     }
     ComObj *m = com_new(K_MATERIAL);
-    uint32_t view = com_view(m, version3(c) ? IF_D3DMATERIAL3 : IF_D3DMATERIAL2);
+    uint32_t view =
+        com_view(m, version3(c) ? IF_D3DMATERIAL3 : version1(c) ? IF_D3DMATERIAL : IF_D3DMATERIAL2);
     if (!view) {
         com_release(m);
         com_ret(c, E_OUTOFMEMORY);
@@ -2068,8 +2659,13 @@ void D3D_FindDevice(X86 *c) {
         com_ret(c, DDERR_INVALIDPARAMS);
         return;
     }
-    if (rd32(search + D3DFDS_OFF_dwSize) != D3DFDS_SIZE ||
-        rd32(result + D3DFDR_OFF_dwSize) != D3DFDR_SIZE || !gm_valid(result, D3DFDR_SIZE)) {
+    // D3DFINDDEVICERESULT is a GUID and two descriptions, so its size names
+    // the description size the caller's DirectX version uses.
+    const uint32_t result_size = rd32(result + D3DFDR_OFF_dwSize);
+    const uint32_t desc_size = (result_size - D3DFDR_OFF_ddHwDesc) / 2;
+    if (rd32(search + D3DFDS_OFF_dwSize) != D3DFDS_SIZE || result_size < D3DFDR_OFF_ddHwDesc ||
+        !device_desc_size_known(desc_size) ||
+        result_size != D3DFDR_OFF_ddHwDesc + 2 * desc_size || !gm_valid(result, result_size)) {
         com_ret(c, DDERR_INVALIDPARAMS);
         return;
     }
@@ -2108,10 +2704,10 @@ void D3D_FindDevice(X86 *c) {
         return;
     }
 
-    gm_zero(result + 4, D3DFDR_SIZE - 4);
+    gm_zero(result + 4, result_size - 4);
     memcpy(gm_ptr(result + D3DFDR_OFF_guid), found->guid, 16);
-    write_device_desc(result + D3DFDR_OFF_ddHwDesc, found->hardware);
-    write_device_desc(result + D3DFDR_OFF_ddSwDesc, false);
+    write_device_desc(result + D3DFDR_OFF_ddHwDesc, found->hardware, desc_size);
+    write_device_desc(result + D3DFDR_OFF_ddHwDesc + desc_size, false, desc_size);
     LOGV("d3d: FindDevice matched %s", found->desc);
     com_ret(c, D3D_OK_);
 }
@@ -2477,7 +3073,7 @@ void viewport_destroy(ComObj *v) {
 // the same object seen as a texture; com.cpp handles that through the view
 // table, so the hook only has to allow it.
 ComObj *surface_qi(ComObj *self, ComIface want) {
-    if (want == IF_D3DTEXTURE2)
+    if (want == IF_D3DTEXTURE2 || want == IF_D3DTEXTURE)
         return self;
     return nullptr;
 }
@@ -2703,6 +3299,27 @@ void d3d_register() {
     com_register_iid(IF_D3DMATERIAL2, IID_IDirect3DMaterial2_);
     com_register_iid(IF_D3DLIGHT, IID_IDirect3DLight_);
     com_register_iid(IF_D3DTEXTURE2, IID_IDirect3DTexture2_);
+
+    // Version 1: execute buffers. The viewport's methods are a prefix of
+    // Viewport2's, so it shares that table.
+    com_define(IF_D3DDEVICE, "DDRAW.dll", "IDirect3DDevice", g_device1, std::size(g_device1));
+    com_define(IF_D3DVIEWPORT, "DDRAW.dll", "IDirect3DViewport", g_viewport2, 16);
+    com_define(IF_D3DMATERIAL, "DDRAW.dll", "IDirect3DMaterial", g_material1,
+               std::size(g_material1));
+    com_define(IF_D3DTEXTURE, "DDRAW.dll", "IDirect3DTexture", g_texture1, std::size(g_texture1));
+    com_define(IF_D3DEXECUTEBUFFER, "DDRAW.dll", "IDirect3DExecuteBuffer", g_execbuf,
+               std::size(g_execbuf));
+    com_bind(IF_D3DDEVICE, K_D3DDEVICE);
+    com_bind(IF_D3DVIEWPORT, K_VIEWPORT);
+    com_bind(IF_D3DMATERIAL, K_MATERIAL);
+    com_bind(IF_D3DTEXTURE, K_SURFACE);
+    com_bind(IF_D3DEXECUTEBUFFER, K_EXECBUF);
+    com_register_iid(IF_D3DDEVICE, IID_IDirect3DDevice_);
+    com_register_iid(IF_D3DVIEWPORT, IID_IDirect3DViewport_);
+    com_register_iid(IF_D3DMATERIAL, IID_IDirect3DMaterial_);
+    com_register_iid(IF_D3DTEXTURE, IID_IDirect3DTexture_);
+    com_register_iid(IF_D3DEXECUTEBUFFER, IID_IDirect3DExecuteBuffer_);
+    com_set_destructor(K_EXECBUF, execbuf_destroy);
 
     com_set_destructor(K_D3DDEVICE, device_destroy);
     com_set_destructor(K_VIEWPORT, viewport_destroy);
