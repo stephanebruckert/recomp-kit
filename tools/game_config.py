@@ -361,6 +361,9 @@ def load(game_dir):
     # start without (TOCA: game directory, CD drive, graphics card).
     if not isinstance(cfg["setup"].setdefault("guest_args", ""), str):
         raise ValueError("%s: [setup] guest_args must be a string" % source)
+    d3d = cfg.setdefault("direct3d", {})
+    if not isinstance(d3d.setdefault("render_target_write_only", False), bool):
+        raise ValueError("%s: [direct3d] render_target_write_only must be true or false" % source)
     # Drive letters GetDriveTypeA reports as CD-ROM: a game that checks its
     # disc by drive type runs a reduced mode when no drive is one.
     cd_drives = cfg["setup"].setdefault("cd_drives", [])

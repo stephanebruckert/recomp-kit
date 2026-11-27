@@ -8278,6 +8278,50 @@ static void test_find_device_literal() {
 // D3DVT_VERTEX draws are lit from the material, ambient and viewport lights
 // and reach the renderer as D3DVT_LVERTEX: a red material under a white light
 // from above is red where the normal faces up and black where it faces away.
+// [direct3d] render_target_write_only: locking the 3D target and blitting it
+// unkeyed to the screen take no read-back; a keyed blit still reads it, and
+// with the option off every reader does.
+static void test_render_target_write_only() {
+    CHECK(make_device_for_test());
+    if (!g_t3_dev)
+        return;
+    g_rec_dd = g_t3_dd;
+    uint32_t primary = make_primary_chain_for_test();
+    CHECK(primary != 0);
+    ComObj *rt = com_this(g_t3_target);
+    auto dirty = [&] {
+        host_d3d_mark_dirty(rt->id, ddraw_surface_generation(rt->id), {0, 0, 64, 64});
+    };
+    auto lock_unlock = [&] {
+        uint32_t desc = sc(0x700);
+        gm_zero(desc, DDSD_SIZE);
+        wr32(desc + DDSD_OFF_dwSize, DDSD_SIZE);
+        CHECK_EQ(call_method(g_t3_target, S_Lock, {0, desc, DDLOCK_WAIT, 0}), DD_OK);
+        CHECK_EQ(call_method(g_t3_target, S_Unlock, {0}), DD_OK);
+    };
+    ddraw_set_render_target_write_only(true);
+    const uint64_t before = host_readback_count_for_test();
+    dirty();
+    lock_unlock();
+    CHECK_EQ(host_readback_count_for_test(), before);
+    dirty();
+    CHECK_EQ(call_method(primary, S_Blt, {0, g_t3_target, 0, DDBLT_WAIT, 0}), DD_OK);
+    CHECK_EQ(host_readback_count_for_test(), before);
+    // A keyed blit reads the source's pixels to test them: it still copies back.
+    uint32_t key = sc(0x780);
+    wr32(key, 0);
+    wr32(key + 4, 0);
+    CHECK_EQ(call_method(g_t3_target, S_SetColorKey, {DDCKEY_SRCBLT, key}), DD_OK);
+    dirty();
+    CHECK_EQ(call_method(primary, S_Blt, {0, g_t3_target, 0, DDBLT_KEYSRC | DDBLT_WAIT, 0}), DD_OK);
+    CHECK_EQ(host_readback_count_for_test(), before + 1);
+    ddraw_set_render_target_write_only(false);
+    dirty();
+    lock_unlock();
+    CHECK_EQ(host_readback_count_for_test(), before + 2);
+    ddraw_set_render_target_write_only(false);
+}
+
 static void test_d3d_vertex_lighting() {
     cpu_reset();
     g_draws.clear();
@@ -13297,6 +13341,9 @@ static void test_audio_asset(const char *path) {
 }
 
 int main() {
+    // Every test is written against the kit's default: a game's
+    // [direct3d] render_target_write_only would skip the read-backs they count.
+    ddraw_set_render_target_write_only(false);
     // Unbuffered, not line buffered: Windows treats _IOLBF as full buffering
     // and a fail-fast abort drops everything queued, including the name of
     // the test that died.
@@ -13442,6 +13489,7 @@ int main() {
         {"unsigned 8-bit media audio", test_media_u8_wav},
         {"MCI digital video device", test_mci_device},
         {"Miles double buffering", test_mss32_double_buffer},
+        {"render target write-only", test_render_target_write_only},
         {"D3DVT_VERTEX lighting", test_d3d_vertex_lighting},
         {"Direct3D5 execute buffer", test_d3d5_execute_buffer},
         {"device description sizes", test_device_desc_sizes},

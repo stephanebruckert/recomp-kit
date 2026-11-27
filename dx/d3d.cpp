@@ -3520,3 +3520,7 @@ extern "C" uint32_t host_sprite_texture_revision(uint32_t handle) {
     ComObj *surface = object_for_handle(handle);
     return surface ? ddraw_surface_revision(surface->id) : 0;
 }
+
+uint32_t d3d_render_target_id() {
+    return g_render_target;
+}

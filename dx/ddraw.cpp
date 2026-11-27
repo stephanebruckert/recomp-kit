@@ -78,6 +78,10 @@ static const uint8_t IID_IDirectDrawColorControl_[16] =
     IID_BYTES(0x4B9F0EE0, 0x0D7E, 0x11D0, 0x9B, 0x06, 0x00, 0xA0, 0xC9, 0x03, 0xA3, 0xB8);
 
 namespace {
+// [direct3d] render_target_write_only: the game never reads its 3D render
+// target back (see Surface_Lock and Blt). ddraw_set_render_target_write_only
+// changes it for tests.
+bool g_rt_write_only = RECOMP_RT_WRITE_ONLY != 0;
 void (*present_first_write)() = nullptr;
 void (*present_seal)() = nullptr;
 std::mutex present_release_mutex;
@@ -2888,7 +2892,14 @@ void Surface_Blt(X86 *c) {
         if (keys.dst)
             ++g_access_ref().dstkey_read;
         ddraw_refresh_retained_writes(src, sr);
-        d3d_read_surface(src, sr, HOST_READ_BLT_SOURCE);
+        // Showing the 3D target by blitting it to the screen, with no keys,
+        // is a present: the compositor takes the picture from the GPU. With
+        // the per-game promise that the target is never read back, no copy
+        // of it is needed on the CPU.
+        const bool rt_present = g_rt_write_only && src->id == d3d_render_target_id() &&
+                                surface_is_on_screen(dst) && !keys.src && !keys.dst;
+        if (!rt_present)
+            d3d_read_surface(src, sr, HOST_READ_BLT_SOURCE);
         if (keys.dst)
             d3d_read_surface(dst, d, HOST_READ_DSTKEY);
         // Recorded BEFORE the preservation, not just before the copy: a
@@ -2989,7 +3000,10 @@ void Surface_BltFast(X86 *c) {
     if (keys.dst)
         ++g_access_ref().dstkey_read;
     ddraw_refresh_retained_writes(src, sr);
-    d3d_read_surface(src, sr, HOST_READ_BLT_SOURCE);
+    // The same present-by-blit as in Blt (render_target_write_only).
+    if (!(g_rt_write_only && src->id == d3d_render_target_id() && surface_is_on_screen(dst) &&
+          !keys.src && !keys.dst))
+        d3d_read_surface(src, sr, HOST_READ_BLT_SOURCE);
     if (keys.dst)
         d3d_read_surface(dst, d, HOST_READ_DSTKEY);
     uint8_t *cov = record_blit(dst, d, src, sr, keys, false, 0);
@@ -3345,7 +3359,11 @@ void Surface_Lock(X86 *c) {
     note_lock_access(arg(c, 3));
     if (!(arg(c, 3) & DDLOCK_READONLY))
         presenter_write();
-    d3d_read_surface(s, r, (arg(c, 3) & DDLOCK_WRITEONLY) ? HOST_READ_LOCK_WRITE : HOST_READ_LOCK);
+    // A game that only writes into its 3D target when it locks it (TOCA
+    // draws menu text there) needs no copy of the GPU picture first: the
+    // writes are recorded and layered over it. Opt-in per game.
+    if (!(g_rt_write_only && s->id == d3d_render_target_id()))
+        d3d_read_surface(s, r, (arg(c, 3) & DDLOCK_WRITEONLY) ? HOST_READ_LOCK_WRITE : HOST_READ_LOCK);
     // A Lock is a write about to happen: the guest takes a pointer and the
     // shim never sees the stores. Any revision a frame is holding has to be
     // taken now, because after this there is no "before" left.
@@ -5035,4 +5053,8 @@ extern "C" void ddraw_gdi_end_primary(uint32_t dc) {
         surface_pixels_changed(s);
         baseline_note_revision(s, before);
     }
+}
+
+void ddraw_set_render_target_write_only(bool on) {
+    g_rt_write_only = on;
 }

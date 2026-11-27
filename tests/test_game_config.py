@@ -467,6 +467,7 @@ class LoadTests(unittest.TestCase):
             self.assertIn("#define RECOMP_REQUIRED_DIRS {0}", header)
             self.assertIn('#define RECOMP_CD_DRIVES ""', header)
             self.assertIn('#define RECOMP_GUEST_ARGS_DEFAULT ""', header)
+            self.assertIn("#define RECOMP_RT_WRITE_ONLY 0", header)
             (game / "game.toml").write_text(
                 base.replace("[bundle]\nexclude = []", '[bundle]\nexclude = ["*.dll", "app"]')
                 + '\n[launcher]\ntitle = "Stub \\"Deluxe\\""\nstore = "https://example.test/stub"\n'
