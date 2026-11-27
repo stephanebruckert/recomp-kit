@@ -1368,6 +1368,36 @@ void m_timeGetDevCaps(X86 *c) {
     set_eax(c, 0);
 }
 
+// No multiplayer, joystick or child processes: each reports "not there" with the
+// documented failure value, so a game takes its no-device path with the stack
+// balanced.
+void m_keybd_event(X86 *c) {
+    set_eax(c, 0);
+}
+
+void m_DirectPlayCreate(X86 *c) {
+    uint32_t out = arg(c, 1);
+    if (out && gm_valid(out, 4))
+        wr32(out, 0);
+    set_eax(c, 0x8877010Eu); // DPERR_UNAVAILABLE
+}
+
+void m_DirectPlayEnumerateA(X86 *c) {
+    set_eax(c, 0); // DP_OK, no service providers
+}
+
+void m_joy_unplugged(X86 *c) {
+    set_eax(c, 167); // JOYERR_UNPLUGGED
+}
+
+void m_WinExec(X86 *c) {
+    set_eax(c, 2); // ERROR_FILE_NOT_FOUND
+}
+
+void m_GetExitCodeProcess(X86 *c) {
+    set_eax(c, 0);
+}
+
 void m_timeBeginPeriod(X86 *c) {
     set_eax(c, 0);
 }
@@ -2393,6 +2423,18 @@ const ImportShim g_misc_shims[] = {
     {"DINPUT8.dll", "DirectInput8Create", 5, nullptr},
     {"SHFOLDER.dll", "SHGetFolderPathA", 5, s_SHGetFolderPathA},
     {"DSOUND.dll", "ord6", 3, nullptr}, // DirectSoundCaptureCreate
+    {"USER32.dll", "keybd_event", 4, m_keybd_event},
+    // DPLAYX by ordinal (1 DirectPlayCreate, 2 DirectPlayEnumerateA) and by name.
+    {"DPLAYX.dll", "ord1", 3, m_DirectPlayCreate},
+    {"DPLAYX.dll", "DirectPlayCreate", 3, m_DirectPlayCreate},
+    {"DPLAYX.dll", "ord2", 2, m_DirectPlayEnumerateA},
+    {"DPLAYX.dll", "DirectPlayEnumerateA", 2, m_DirectPlayEnumerateA},
+    {"WINMM.dll", "joyGetDevCapsA", 3, m_joy_unplugged},
+    {"WINMM.dll", "joyGetPosEx", 2, m_joy_unplugged},
+    {"WINMM.dll", "joyGetPos", 2, m_joy_unplugged},
+    {"WINMM.dll", "mciGetDeviceIDA", 1, nullptr},
+    {"KERNEL32.dll", "WinExec", 2, m_WinExec},
+    {"KERNEL32.dll", "GetExitCodeProcess", 2, m_GetExitCodeProcess},
     // Wave in and out: the audio task owns the behaviour; these keep the
     // stack balanced until it lands.
     {"WINMM.dll", "waveOutGetNumDevs", 0, nullptr},
