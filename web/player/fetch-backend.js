@@ -25,7 +25,7 @@ addToLibrary({
     siblingSize: 4 * 1024 * 1024,   // small files fetched with the first one opened in their folder
     siblingBudget: 32 * 1024 * 1024,
     demandSlots: 8,          // concurrent requests for waiting reads
-    backgroundSlots: 3,      // concurrent requests for the background fill
+    backgroundSlots: 4,      // concurrent requests for the background fill
     timeoutMs: 45000,        // a request that delivers nothing is retried
     attempts: 6,
     prefetchBudget: 64 * 1024 * 1024,  // bytes one prefetch hint may queue
@@ -193,15 +193,14 @@ addToLibrary({
         .finally(() => { active[p]--; running.delete(job); pump(); });
     }
     function pump() {
-      // A read the guest waits on gets the whole connection: background
-      // downloads in flight are cancelled and fetched again later.
-      if (waitingReads || queue[0].length)
-        for (const job of running)
-          if (job.entry.priority === 2) job.controller.abort();
       for (let p = 0; p < 2; ++p)
         while (queue[p].length && active[0] + active[1] < cfg.demandSlots) start(p);
-      // The background fill never competes with a read the guest waits on.
-      if (!waitingReads && !queue[0].length && !queue[1].length && !active[0] && !active[1])
+      // The background fill runs beside the guest's reads, which have their
+      // own slots: it only holds back while reads are still queued. Cancelling
+      // it for every waiting read starved it completely in a game that streams
+      // its music (a read every few seconds), and a remote connection has
+      // bandwidth for both.
+      if (!queue[0].length)
         while (queue[2].length && active[2] < cfg.backgroundSlots) start(2);
     }
     function promote(key, priority) {
