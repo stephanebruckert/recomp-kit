@@ -58,6 +58,8 @@ void open_cd(X86 *c) {
                 t.path = win32_host_path_op(p, WIN32_FILE_READ);
                 mf::Media probe;
                 if (!probe.open(t.path) || !probe.has_audio()) {
+                    LOGW("redbook: CD track %s (%s) has no playable audio; no CD music",
+                         p, t.path.empty() ? "not found" : t.path.c_str());
                     tracks.clear();
                     return;
                 }
@@ -69,8 +71,10 @@ void open_cd(X86 *c) {
         if (tracks.empty() || !position)
             return;
         channel = dx_alloc_audio_channel();
-        if (channel < 0)
+        if (channel < 0) {
+            LOGW("redbook: no audio channel free; no CD music");
             return;
+        }
         opened = true;
         volume = 127;
         LOGV("redbook: opened %zu configured tracks (%u ms)", tracks.size(), position);

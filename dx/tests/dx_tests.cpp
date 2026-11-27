@@ -6613,6 +6613,8 @@ static void test_mss32_arities() {
         {"_AIL_allocate_sample_handle@4", 1},
         {"_AIL_release_sample_handle@4", 1},
         {"_AIL_init_sample@4", 1},
+        {"_AIL_set_sample_playback_rate@8", 2},
+        {"_AIL_minimum_sample_buffer_size@12", 3},
         {"_AIL_set_sample_file@12", 3},
         {"_AIL_start_sample@4", 1},
         {"_AIL_end_sample@4", 1},
@@ -6655,6 +6657,11 @@ static void test_mss32_arities() {
     CHECK_EQ(imports_argc(TRAMP_BASE + 1), 0u);
     CHECK_EQ(imports_argc(TRAMP_BASE + imports_count() * TRAMP_STRIDE), 0u);
     CHECK_EQ(call_shim(tramp("mss32.dll", "_AIL_startup@0"), {}), 1u);
+    // 22050 Hz 16-bit stereo: 1/16 s is 5512 bytes, rounded up to 5632.
+    CHECK_EQ(call_shim(tramp("mss32.dll", "_AIL_minimum_sample_buffer_size@12"), {0, 22050, 3}),
+             5632u);
+    CHECK_EQ(call_shim(tramp("mss32.dll", "_AIL_minimum_sample_buffer_size@12"), {0, 11025, 0}) % 256,
+             0u);
     CHECK_EQ(call_shim(tramp("mss32.dll", "_AIL_enumerate_3D_providers@12"), {0, 0, 0}), 0u);
     CHECK_EQ(call_shim(tramp("mss32.dll", "_AIL_open_3D_provider@4"), {0}), 1u);
     uint32_t sample = call_shim(tramp("mss32.dll", "_AIL_allocate_sample_handle@4"), {0});

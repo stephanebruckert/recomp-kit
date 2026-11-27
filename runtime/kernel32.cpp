@@ -1013,6 +1013,10 @@ void k_OpenFile(X86 *c) {
         return;
     }
     uint32_t mode = style & 3, access = mode == 1 ? 0x40000000u : mode == 2 ? 0xc0000000u : 0x80000000u;
+    // OF_CREATE opens the new file for writing whatever the access bits say:
+    // TOCA saves its settings with OF_CREATE alone (mode 0, OF_READ).
+    if (style & 0x1000)
+        access |= 0x40000000u;
     X86 t = *c;
     t.r[R_ESP] = c->r[R_ESP] - 64;
     const uint32_t args[7] = {arg(c, 0), access, 3 /* share read|write */, 0,

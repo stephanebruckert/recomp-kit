@@ -50,6 +50,7 @@ struct Sample {
     RiffWave wave{};
     int32_t volume = 127, pan = 64;
     uint32_t loops = 1, remaining = 0;
+    uint32_t rate = 0; // AIL_set_sample_playback_rate; 0 plays at the file's rate
     bool playing = false;
 };
 std::vector<Sample> g_samples(64);
@@ -91,7 +92,7 @@ void sample_play(Sample &s) {
     p.channel = s.channel;
     p.pcm = s.decoded.empty() ? (const void *)(g_mem + s.wave.pcm) : s.decoded.data();
     p.bytes = s.wave.pcm_bytes;
-    p.sample_rate = (int32_t)s.wave.rate;
+    p.sample_rate = (int32_t)(s.rate ? s.rate : s.wave.rate);
     p.channels = s.wave.channels;
     p.bits = s.wave.bits;
     p.loop = s.loops == 0 ? 1 : 0;
@@ -347,6 +348,24 @@ void ail_set_sample_pan(X86 *c) {
     set_eax(c, 0);
 }
 
+// Engine notes and doppler: the rate the sample plays at, in Hz, from now on.
+void ail_set_sample_playback_rate(X86 *c) {
+    if (Sample *s = sample_for(arg(c, 0))) {
+        s->rate = std::clamp(arg(c, 1), 100u, 200000u);
+        if (s->channel >= 0 && s->playing)
+            host_audio_set_frequency(s->channel, s->rate);
+    }
+    set_eax(c, 0);
+}
+
+// The smallest double-buffer half a driver accepts at a rate and format
+// (DIG_F_*: bit 0 16-bit, bit 1 stereo): about 1/16 s, a multiple of 256.
+void ail_minimum_sample_buffer_size(X86 *c) {
+    uint32_t rate = std::clamp(arg(c, 1), 8000u, 96000u), format = arg(c, 2);
+    uint32_t frame = (format & 1 ? 2u : 1u) * (format & 2 ? 2u : 1u);
+    set_eax(c, (rate / 16 * frame + 255) & ~255u);
+}
+
 void ail_set_sample_loop_count(X86 *c) {
     if (Sample *s = sample_for(arg(c, 0)))
         s->loops = arg(c, 1);
@@ -564,6 +583,8 @@ const ImportShim g_mss32_shims[] = {
     AIL(set_sample_volume, 8, ail_set_sample_volume),
     AIL(set_sample_pan, 8, ail_set_sample_pan),
     AIL(set_sample_loop_count, 8, ail_set_sample_loop_count),
+    AIL(set_sample_playback_rate, 8, ail_set_sample_playback_rate),
+    AIL(minimum_sample_buffer_size, 12, ail_minimum_sample_buffer_size),
     AIL(sample_loop_count, 4, ail_sample_loop_count),
     AIL(set_sample_reverb, 16, ret0),
     AIL(open_stream, 12, ail_open_stream),

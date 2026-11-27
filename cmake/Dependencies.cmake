@@ -109,7 +109,7 @@ if(RECOMP_VIDEO)
     # WMV-numbered codec, and the demuxer that reads the container is no
     # use without the decoder that reads the frames.
     --enable-decoder=msmpeg4v1,msmpeg4v2,msmpeg4v3,indeo5,vorbis,adpcm_ima_wav,pcm_s16le,pcm_u8
-    --enable-demuxer=bink,smacker,asf,mp3,avi,ogg --enable-parser=vc1,mpegaudio
+    --enable-demuxer=bink,smacker,asf,mp3,avi,ogg,wav --enable-parser=vc1,mpegaudio
     --enable-protocol=file
     --disable-autodetect --disable-xlib --disable-libxcb --disable-sdl2
     --disable-iconv --disable-zlib --disable-bzlib --disable-lzma

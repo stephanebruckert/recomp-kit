@@ -4486,6 +4486,24 @@ static void test_mod_seams(X86 *c) {
     check(!g_seam_calls.empty() && g_seam_calls.back().second == WIN32_FILE_WRITE,
           "and is what resolves the write tier");
     call_import(c, "KERNEL32.dll", "CloseHandle", {hw});
+    // OpenFile with OF_CREATE alone (no OF_WRITE) still creates for writing,
+    // through the write tier: TOCA saves its settings this way.
+    {
+        g_seam_calls.clear();
+        uint32_t of = scratch + 0xa00;
+        uint32_t hc = call_import(c, "KERNEL32.dll", "OpenFile",
+                                  {put_str("data\\saved.cfg"), of, 0x1000 /*OF_CREATE*/});
+        check(hc != 0xffffffffu && !g_seam_calls.empty() &&
+                  g_seam_calls.back().second == WIN32_FILE_WRITE,
+              "OpenFile(OF_CREATE) resolves through the write tier");
+        check(call_import(c, "KERNEL32.dll", "WriteFile", {hc, put_str("CFG!"), 4, got, 0}) == 1 &&
+                  rd32(got) == 4,
+              "and the new file takes a write");
+        call_import(c, "KERNEL32.dll", "CloseHandle", {hc});
+        OsStat st;
+        check(os_stat((g_seam_root + "/write/data/saved.cfg").c_str(), &st) == 0,
+              "the created file is in the write tier");
+    }
     {
         FILE *wf = fopen((g_seam_root + "/write/data/shared.txt").c_str(), "rb");
         check(wf != nullptr, "the write tier now holds the file");
