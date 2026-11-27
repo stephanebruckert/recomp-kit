@@ -3253,8 +3253,12 @@ bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
             }
             legacyWriteBackPending();
             target_has_palette_ = step.hasPalette;
+            // Only a palette that changed stales the nearest-colour table:
+            // rebuilding it costs 8M comparisons, and a front end replays a
+            // CPU step per glyph it draws.
+            if (memcmp(target_palette_, step.palette, sizeof target_palette_))
+                index_cache_valid_ = false;
             memcpy(target_palette_, step.palette, sizeof target_palette_);
-            index_cache_valid_ = false;
             auto r = step.record;
             r.cpu_pixels = step.pixels.data();
             r.coverage = step.coverage.data();
@@ -3265,6 +3269,35 @@ bool D3DRenderer::Impl::replayLegacyFrame(uint64_t frame) {
             mask_shape(target_rmask_, &rs, &rm);
             mask_shape(target_gmask_, &gs, &gm);
             mask_shape(target_bmask_, &bs, &bm);
+            if (inBytes == outBytes) {
+                // Same storage format: copy each run of covered pixels whole.
+                // A front end that redraws full-screen layers every frame
+                // spent most of a replay in the per-pixel path below.
+                const int x0 = std::max(0, -r.dst_x), x1 = std::min(r.w, guest_width_ - r.dst_x);
+                for (int y = 0; y < r.h; ++y) {
+                    int dy = r.dst_y + y;
+                    if (dy < 0 || dy >= guest_height_)
+                        continue;
+                    const uint8_t *cov = r.coverage + (size_t)y * r.w;
+                    for (int x = x0; x < x1;) {
+                        if (!cov[x]) {
+                            ++x;
+                            continue;
+                        }
+                        int end = x + 1;
+                        while (end < x1 && cov[end])
+                            ++end;
+                        memcpy(pixels.data() + (size_t)dy * target_pitch_ +
+                                   (size_t)(r.dst_x + x) * outBytes,
+                               r.cpu_pixels + (size_t)y * r.cpu_pitch + (size_t)x * inBytes,
+                               (size_t)(end - x) * outBytes);
+                        x = end;
+                    }
+                }
+                needs_upload_ = true;
+                coverage_reset_pending_ = true;
+                continue;
+            }
             if (target_bpp_ == 8 && target_has_palette_ && !index_cache_valid_)
                 rebuildIndexCache();
             for (int y = 0; y < r.h; ++y)
