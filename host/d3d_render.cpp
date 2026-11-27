@@ -99,6 +99,15 @@ enum {
 };
 enum { VT_VERTEX = 1, VT_LVERTEX = 2, VT_TLVERTEX = 3 };
 
+// Frames handed to the compositor: world at drawable resolution, or the
+// guest-resolution picture because of classic mode, a legacy frame, or a
+// reader that materialized the layers. The smoke report prints them.
+static uint64_t g_composited[4] = {0, 0, 0, 0};
+extern "C" void host_d3d_composited_counts(uint64_t out[4]) {
+    for (int k = 0; k < 4; ++k)
+        out[k] = g_composited[k];
+}
+
 namespace {
 
 uint32_t g_total_draws = 0;
@@ -1904,6 +1913,10 @@ void D3DRenderer::Impl::sealFrame(uint64_t f) {
                             float(slot.presentTarget.h) / in.guest_h, 0, 0, domain};
                 in.legacy =
                     mods_display_classic() || host_frame_legacy({f}) || slot.materializedLayers;
+                ++g_composited[in.legacy ? (mods_display_classic()        ? 1
+                                            : host_frame_legacy({f})    ? 2
+                                                                        : 3)
+                                         : 0];
                 if (in.legacy) {
                     in.world = {};
                     in.overlay = {};

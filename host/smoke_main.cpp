@@ -66,6 +66,8 @@
 #include <vector>
 #include "../platform/os.h"
 
+extern "C" void host_d3d_composited_counts(uint64_t out[4]);
+
 namespace {
 
 // --- the script -------------------------------------------------------------
@@ -2010,6 +2012,13 @@ void report(FILE *out, bool abnormal) {
     }
     fprintf(out, "Direct3D:           %u draws, %u textures, %u write-backs\n",
             host_d3d_total_draws(), host_d3d_total_textures(), host_d3d_total_flushes());
+    {
+        uint64_t n[4];
+        host_d3d_composited_counts(n);
+        fprintf(out, "composited frames:  %llu world, %llu classic, %llu legacy, %llu materialized\n",
+                (unsigned long long)n[0], (unsigned long long)n[1], (unsigned long long)n[2],
+                (unsigned long long)n[3]);
+    }
     fprintf(out, "legacy frames:      %llu detected (each stays legacy until the screen class changes)\n",
             (unsigned long long)host_legacy_fallback_count());
     fprintf(out, "input:              %u changes announced, %u reads by the guest\n",
