@@ -32,11 +32,14 @@ async function gameId() {
 async function start() {
   if (!crossOriginIsolated) throw new Error("This page must be served cross-origin isolated (COOP/COEP headers).");
   if (!navigator.gpu) throw new Error("This browser has no WebGPU.");
-  const id = await gameId();
+  const pathId = await gameId();
   const gamesUrl = new URL("../games.json", location.href).href;
   const games = await fetch(gamesUrl).then((r) => r.json());
-  const game = games.find((g) => g.id === id);
-  if (!game) throw new Error(`No game "${id}" in the launcher's games.json.`);
+  // At a site's root there is no game folder in the address: a site that
+  // lists a single game plays that one.
+  const game = pathId ? games.find((g) => g.id === pathId) : games.length === 1 ? games[0] : undefined;
+  if (!game) throw new Error(`No game "${pathId}" in the launcher's games.json.`);
+  const id = game.id;
   document.title = game.title;
 
   // Imported data remains preferred by default. Explicit streaming never
